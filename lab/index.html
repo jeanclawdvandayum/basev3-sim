@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>alUSDb Base — Loop Mechanics Lab</title>
+<!--
+  alUSDb Base Launch — Loop Mechanics Lab
+  Rev v1.0 (2026-09-01) — initial build, recalibrated model (scoopy flow params:
+  impact 0.035, MYT 5%, bid 0.9941, 30%/day deploy, 35%/day tap, 10d migration).
+  Rev v1.1 (2026-09-02) — finished engine + full UI layer; fixed depth lifecycle
+  (was: uninitialized depthNow/depthLive -> NaN), removed dead draft engine,
+  single noise draw per day (python-parity), daily path, solvency invariant
+  flags, cumulative churn chart, attribution line, 8 presets.
+  Model: daily-timestep port of ../base_loop_sim.py
+  Identities baked in: float neutrality, T-bill parity peg, ~9x yield/equity conversion.
+-->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg:#0b0f0d; --card:#121a15; --card2:#0e1511; --border:#1f2b24;
+    --accent:#39d353; --amber:#f0b72f; --red:#ff7b72; --blue:#58a6ff;
+    --purple:#bc8cff; --dim:#7d938a; --text:#d7e2dc;
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font:14px/1.45 -apple-system,'Segoe UI',sans-serif; }
+  .mono { font-family:'SF Mono',ui-monospace,Menlo,Consolas,monospace; }
+  header { display:flex; align-items:baseline; gap:14px; padding:14px 20px 10px; border-bottom:1px solid var(--border); flex-wrap:wrap;}
+  header h1 { font-size:17px; font-weight:650; letter-spacing:.2px; }
+  header .rev { color:var(--dim); font-size:12px; }
+  header .chip { font-size:11px; padding:2px 9px; border:1px solid var(--accent); color:var(--accent); border-radius:20px; }
+  .wrap { display:grid; grid-template-columns:318px 1fr; height:calc(100vh - 52px); }
+  aside { border-right:1px solid var(--border); overflow-y:auto; padding:12px 14px 60px; background:var(--card2); }
+  main { overflow-y:auto; padding:14px 18px 60px; }
+
+  .presets { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-bottom:12px; }
+  .presets button { background:#16211b; border:1px solid var(--border); color:var(--text); padding:7px 4px; border-radius:7px; cursor:pointer; font-size:12px; }
+  .presets button:hover { border-color:var(--accent); }
+  .presets button.active { border-color:var(--amber); color:var(--amber); }
+  #runBtn { width:100%; margin:4px 0 14px; background:var(--accent); color:#04110a; font-weight:700; border:0; padding:9px; border-radius:8px; cursor:pointer; font-size:13px; }
+
+  .grp { border:1px solid var(--border); border-radius:9px; margin-bottom:10px; background:var(--card); }
+  .grp > summary { cursor:pointer; padding:8px 11px; font-size:12.5px; font-weight:600; color:var(--accent); list-style:none; display:flex; justify-content:space-between;}
+  .grp > summary::-webkit-details-marker { display:none; }
+  .grp > summary .cnt { color:var(--dim); font-weight:400; }
+  .grp .body { padding:2px 11px 10px; }
+  .ctl { margin:9px 0 2px; }
+  .ctl label { display:flex; justify-content:space-between; font-size:11.5px; color:var(--dim); margin-bottom:3px; }
+  .ctl label b { color:var(--text); font-weight:500; }
+  .ctl .val { color:var(--amber); }
+  .row { display:flex; gap:6px; align-items:center; }
+  input[type=range] { flex:1; appearance:none; height:3px; background:var(--border); border-radius:2px; outline:none; }
+  input[type=range]::-webkit-slider-thumb { appearance:none; width:12px; height:12px; border-radius:50%; background:var(--accent); cursor:pointer; }
+  input[type=number] { width:74px; background:#0a100c; border:1px solid var(--border); color:var(--text); padding:3px 6px; border-radius:5px; font-size:12px; text-align:right;}
+  .tgl { display:flex; justify-content:space-between; align-items:center; padding:7px 0; font-size:12.5px; border-top:1px dashed var(--border); margin-top:7px;}
+  .tgl input { accent-color:var(--accent); transform:scale(1.2); }
+
+  .cards { display:grid; grid-template-columns:repeat(6,1fr); gap:10px; margin-bottom:14px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:9px; padding:10px 12px; }
+  .card .k { font-size:10.5px; color:var(--dim); text-transform:uppercase; letter-spacing:.6px; margin-bottom:4px;}
+  .card .v { font-size:19px; font-weight:650; }
+  .card .s { font-size:11px; color:var(--dim); margin-top:2px;}
+  .good { color:var(--accent); } .warn { color:var(--amber); } .bad { color:var(--red); }
+
+  .chart-card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:12px 14px 8px; margin-bottom:14px; }
+  .chart-card h3 { font-size:12.5px; color:var(--dim); font-weight:600; margin-bottom:6px; letter-spacing:.4px;}
+  .chart-box { position:relative; height:340px; }
+  .chart-box.tall { height:400px; }
+  .note { font-size:11.5px; color:var(--dim); padding:8px 2px; }
+  #inv-flag { display:none; margin:0 0 14px; padding:9px 13px; border:1px solid var(--red); border-radius:8px; color:var(--red); font-size:12.5px; background:#1a0e0d; }
+  #attr-line { font-size:11.5px; color:var(--dim); padding:2px 2px 8px; }
+  @media (max-width: 900px){ .cards{grid-template-columns:repeat(3,1fr);} .wrap{grid-template-columns:1fr;} aside{max-height:45vh;} }
+</style>
+</head>
+<body>
+<header>
+  <h1>alUSDb Base — Loop Mechanics Lab</h1>
+  <span class="chip">rev v1.1</span>
+  <span class="rev">daily-timestep port of base_loop_sim.py · debtor-side 0.1% fee · no borrower interest · 28d linear vest</span>
+</header>
+<div class="wrap">
+<aside>
+  <div class="presets">
+    <button data-p="base" class="active">Base</button>
+    <button data-p="cold">Cold Start</button>
+    <button data-p="shock">Yield Shock</button>
+    <button data-p="run">Panic Run</button>
+    <button data-p="loss">Strategy Loss</button>
+    <button data-p="turbo">Turbo Looping</button>
+    <button data-p="higharb">High Arb</button>
+    <button data-p="thinlp">Thin LP</button>
+  </div>
+  <button id="runBtn">⟳ RE-RUN SIMULATION</button>
+  <div id="controls"></div>
+  <div class="note">Model simplifications: daily steps, LP inventory loss as depth drift only, blended fee tier, one defender pool (sticky + arb), deterministic seeded noise. Identities: float neutrality (0.99r re-mint / r redeemed), peg bid = 1−(r_f+premium)×28/365, ~9x yield/equity conversion.</div>
+</aside>
+<main>
+  <div id="inv-flag"></div>
+  <div class="cards">
+    <div class="card"><div class="k">mature peg (yr 2)</div><div class="v mono" id="s-peg">–</div><div class="s">bid <span id="s-bid" class="mono">–</span></div></div>
+    <div class="card"><div class="k">launch low (8wk)</div><div class="v mono" id="s-low">–</div><div class="s">daily min <span id="s-min" class="mono">–</span></div></div>
+    <div class="card"><div class="k">churn</div><div class="v mono" id="s-churn">–</div><div class="s">cycles/yr · <span id="s-churnvol" class="mono">–</span> vol</div></div>
+    <div class="card"><div class="k">supply D (2yr)</div><div class="v mono" id="s-supply">–</div><div class="s">float <span id="s-float" class="mono">–</span></div></div>
+    <div class="card"><div class="k">collateral C</div><div class="v mono" id="s-c">–</div><div class="s">from <span id="s-c0" class="mono">–</span> start</div></div>
+    <div class="card"><div class="k">defender capital</div><div class="v mono" id="s-arb">–</div><div class="s">arb profit <span id="s-arbp" class="mono">–</span></div></div>
+  </div>
+  <div class="chart-card"><h3>PEG — alUSDb / USDC (bid = T-bill indifference, amber dashed)</h3><div class="chart-box tall"><canvas id="c-peg"></canvas></div></div>
+  <div class="chart-card"><h3>SYSTEM SIZE — collateral / debt / float ($M)</h3><div class="chart-box"><canvas id="c-size"></canvas></div></div>
+  <div class="chart-card"><h3>LIQUIDITY — LP depth & defender capital ($M)</h3><div class="chart-box"><canvas id="c-liq"></canvas></div></div>
+  <div class="chart-card"><h3>RATES — LP / arb / looper APR (%)</h3><div class="chart-box"><canvas id="c-apr"></canvas></div></div>
+  <div class="chart-card"><h3>CHURN — cumulative minted vs redeemed ($M)</h3><div class="chart-box"><canvas id="c-churn"></canvas></div><div id="attr-line"></div></div>
+</main>
+</div>
+
+<script>
+"use strict";
+/* ============================= engine — faithful port of base_loop_sim.py ============================= */
+const DEFAULTS = {
+  days:730, seed:7,
+  ltv:0.90, redemption_days:28, protocol_fee:0.001, perf_fee:0.15, myt_yield:0.05,
+  dealloc_cap_daily:0.10,
+  initial_equity:2e6, initial_depth:1e6, initial_arb:1.5e6, initial_peg:0.999,
+  seed_liquidity_team:5e5,
+  impact_k:0.035, sticky_frac:0.10, peg_max:1.005, peg_floor_hard:0.90,
+  headroom_tap_daily:0.35, gate_low:0.95, gate_full:0.99,
+  deposit_base_daily:6e4, deposit_sensitivity:4e6, looper_hurdle:0.15, exit_sensitivity:3e7,
+  arb_hurdle:0.05, arb_deploy_daily:0.30, arb_inflow_apr:0.065, arb_inflow_daily:2e5,
+  arb_exit_apr:0.05, arb_exit_daily:5e4,
+  fee_tier:0.0003, emissions_per_day:3000, lp_alt_apr:0.06, lp_elasticity:0.08, lp_decay:0.30,
+  flow_noise:0.30, risk_premium:0.0,            // python-parity default: T-bill parity bid 0.9962; scoopy's 0.9941 band = +275bp on this dial
+  cold_start:false,
+  shock_day:-1, shock_yield:0.005, recovery_day:-1,
+  run_day:-1, run_frac:0.20,
+  loss_day:-1, loss_frac:0.15
+};
+let P = {...DEFAULTS};
+let CUR_PRESET = "base";
+
+const PRESETS = {
+  base:    {label:"Base",           ov:{}},
+  cold:    {label:"Cold Start",     ov:{cold_start:true}},
+  shock:   {label:"Yield Shock",    ov:{shock_day:150, shock_yield:0.005, recovery_day:300}},
+  run:     {label:"Panic Run",      ov:{run_day:120, run_frac:0.20}},
+  loss:    {label:"Strategy Loss",  ov:{loss_day:150, loss_frac:0.15}},
+  turbo:   {label:"Turbo Looping",  ov:{headroom_tap_daily:0.70}},
+  higharb: {label:"High Arb",       ov:{initial_arb:5e6}},
+  thinlp:  {label:"Thin LP",        ov:{initial_depth:4e5, emissions_per_day:800}}
+};
+
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;}}
+
+function runSimRaw(cfg){
+  const rng = mulberry32(cfg.seed);
+  const clamp=(x,lo,hi)=>Math.max(lo,Math.min(hi,x));
+  // cold-start overrides (python: dc_replace inside run())
+  const c = cfg.cold_start
+    ? Object.assign({},cfg,{initial_arb:3e5,initial_depth:6e5,sticky_frac:0.05,
+                          deposit_base_daily:3e4,risk_premium:0.03})
+    : cfg;
+
+  // starting state
+  let C=c.initial_equity+c.seed_liquidity_team;   // collateral in MYT (USDC)
+  let D=0, F=0;                                   // debt / float (alUSD)
+  let depth=c.initial_depth;                      // LP depth $
+  let arb=c.initial_arb;                          // defender capital $
+  let backlog=0, pendR=0, pendY=0;
+  let ema=0, avgDsum=0;
+  let equity=0, arbProfit=0, lpFees=0, lpEmis=0, protFee=0, perfFee=0, debtorFees=0;
+  let mintVol=0, redeemVol=0;
+  const attr={replacement:0, yield:0, equity:0};
+  const vest=[];
+  let myt=c.myt_yield;
+  let p=c.initial_peg;
+  let pMinDaily=c.initial_peg, pMaxDaily=c.initial_peg;
+  const inv={ok:true, firstBadDay:null, worstDoverC:0, worstFbreach:0};
+
+  // daily path (full resolution for charts + receipts)
+  const pegs=[], Cs=[], Ds=[], Fs=[], depths=[], arbs=[],
+        lpAprs=[], arbAprs=[], looperAprs=[], cumMint=[], cumRedeem=[];
+  let cm=0, cr=0;
+
+  for(let day=0; day<c.days; day++){
+    avgDsum += D;
+
+    // scenario schedule
+    if(c.shock_day===day) myt=c.shock_yield;
+    if(c.recovery_day===day) myt=c.myt_yield;
+
+    // 1) YIELD: collateral compounds net of perf fee; debt has NO interest.
+    //    Yield creates mint capacity via the LTV ceiling, loop leverages it.
+    const y=C*myt/365, yNet=y*(1-c.perf_fee);
+    C+=yNet; perfFee+=y*c.perf_fee;
+    pendY += yNet*0.9/(1-c.ltv*c.initial_peg);
+
+    // 2) NEW EXTERNAL EQUITY: loopers chase levered carry
+    const lev=Math.min(10, C/Math.max(c.initial_equity,1));
+    const looperApr=lev*myt*(1-c.perf_fee);
+    const gap=looperApr-c.looper_hurdle;
+    const nz=1+(rng()*2-1)*c.flow_noise;          // ONE draw/day (python parity)
+    const inflow=Math.max(0,(c.deposit_base_daily+c.deposit_sensitivity*Math.max(0,gap)/365))*nz;
+    const outflow=c.exit_sensitivity*Math.max(0,-gap)/365;
+    const net=inflow-outflow;
+    if(net<0){
+      const out=Math.min(-net,C*0.02);
+      const repay=Math.min(out/p,D);
+      C-=repay*p; D-=repay; F=Math.max(0,F-repay);
+    } else { C+=net; equity+=net; }
+
+    // 3) MINT / LOOP with G1 mint gate + resting-bid clearing
+    const H=Math.max(0, c.ltv*C-D);
+    const gate=Math.pow(clamp((p-c.gate_low)/(c.gate_full-c.gate_low),0,1),1.5);
+    const m=H*c.headroom_tap_daily*gate;
+    const p_bid=1-(c.arb_hurdle+c.risk_premium)*c.redemption_days/365;
+    const eq_disc=1-p_bid;
+    const effDepth=depth+Math.min(arb*0.5, depth*2.0);   // defender quotes add depth
+    const bidCap=Math.min(arb*c.arb_deploy_daily, eq_disc*effDepth/c.impact_k*1.5);
+    let taken=0, excess=0;
+    if(m>0){
+      const liftCap=Math.max(0,(p_bid-p))/p*effDepth/c.impact_k;
+      const fromBook=Math.min(liftCap,bidCap,m);
+      taken+=fromBook;
+      p=Math.min(p_bid, p+fromBook/effDepth*c.impact_k*p);
+      let remaining=m-fromBook;
+      if(p>=p_bid-1e-9){
+        const atBid=Math.min(remaining, bidCap-fromBook);
+        taken+=atBid; remaining-=atBid;
+      }
+      excess=remaining;
+    }
+    if(m>0){
+      if(excess>0) p=clamp(p-excess/effDepth*c.impact_k*p, c.peg_floor_hard, c.peg_max);
+      D+=m; F+=m-taken; mintVol+=m; cm+=m;
+      C+=m*p;                                       // sale proceeds redeposit
+      if(taken>0){                                  // defenders spend real capital
+        vest.push([day, taken*(1-c.sticky_frac)]);
+        arb-=taken; arbProfit+=taken*(1-p);
+      }
+      const tr=Math.min(m,pendR); pendR-=tr;
+      const ty=Math.min(m-tr,pendY); pendY-=ty;
+      attr.replacement+=tr; attr.yield+=ty; attr.equity+=m-tr-ty;
+    }
+
+    // 4b) FLOAT SWEEP: defenders absorb existing discounted float (panic recovery)
+    const bidLeft=Math.max(0, bidCap-taken);
+    if(p<p_bid-1e-9 && F>0 && arb>0 && bidLeft>0){
+      const sweep=Math.min(bidLeft,F,arb);
+      if(sweep>0){
+        F-=sweep;
+        vest.push([day, sweep*(1-c.sticky_frac)]);
+        arb-=sweep;
+        p=Math.min(p_bid, p+sweep/effDepth*c.impact_k*p);
+        arbProfit+=sweep*(1-p);
+      }
+    }
+
+    // 4) ARB MIGRATION (G2): persistent discounts draw new defender capital
+    const discount=1-p;
+    const arbApr=discount*365/c.redemption_days;
+    ema+=0.10*(discount-ema);
+    if(ema>eq_disc*1.1 && arbApr>=c.arb_inflow_apr) arb+=c.arb_inflow_daily*Math.min(4, ema/eq_disc)*nz;
+    else if(arbApr<c.arb_exit_apr && arb>2e5) arb-=Math.min(arb*0.01, c.arb_exit_daily);
+
+    // 5) VESTING PAYOUT (G3): linear drip over 28d, capped by deallocation cap
+    let owed=0; for(const v of vest) owed+=v[1]/c.redemption_days;
+    const wanted=owed+backlog*0.1;
+    const cap=C*c.dealloc_cap_daily;
+    const pay=Math.min(wanted, cap, C*0.5);
+    if(pay>0){
+      C-=pay*(1+c.protocol_fee);                    // fee extracted from DEBTORS
+      D-=pay;
+      protFee+=pay*c.protocol_fee; debtorFees+=pay*c.protocol_fee;
+      redeemVol+=pay; cr+=pay; pendR+=pay; arb+=pay;
+      for(let i=vest.length-1;i>=0;i--){
+        vest[i][1]*=(1-1/c.redemption_days);
+        if(vest[i][1]<=1) vest.splice(i,1);
+      }
+    }
+    backlog=Math.max(0,wanted-pay);
+    if(backlog>0) p=clamp(p-Math.min(0.002, backlog/Math.max(F,1)*0.01), c.peg_floor_hard, c.peg_max);
+
+    // 6) LP ECONOMICS: fees on churn volume + directed emissions
+    const fees=m*c.fee_tier;
+    const lpApr=(fees+c.emissions_per_day)*365/Math.max(depth,1);
+    lpFees+=fees; lpEmis+=c.emissions_per_day;
+    depth+=fees+c.emissions_per_day;
+    depth+=depth*c.lp_elasticity*(lpApr-c.lp_alt_apr)/365;
+    if(lpApr<c.lp_alt_apr) depth-=depth*c.lp_decay/365;
+    depth=Math.max(depth,1e5);
+
+    // 7) events
+    if(c.run_day===day){
+      const dump=F*c.run_frac;
+      p=clamp(p-dump/depth*c.impact_k*p, c.peg_floor_hard, c.peg_max);
+      F-=dump*0.5;
+      vest.push([day, dump*0.5]);
+    }
+    if(c.loss_day===day) C*=(1-c.loss_frac);
+
+    // record daily path
+    pegs.push(p); Cs.push(C/1e6); Ds.push(D/1e6); Fs.push(F/1e6);
+    depths.push(depth/1e6); arbs.push(arb/1e6);
+    lpAprs.push(lpApr*100); arbAprs.push(arbApr*100); looperAprs.push(looperApr*100);
+    cumMint.push(cm/1e6); cumRedeem.push(cr/1e6);
+
+    // solvency invariants (python hard-asserts; lab flags + degrades gracefully)
+    pMinDaily=Math.min(pMinDaily,p); pMaxDaily=Math.max(pMaxDaily,p);
+    const doc=D/Math.max(C,1);
+    if(doc>inv.worstDoverC) inv.worstDoverC=doc;
+    const fbr=Math.max(0, F-(D+1));
+    if(fbr>inv.worstFbreach) inv.worstFbreach=fbr;
+    if((D>C*1.0001+1) || (F<-1) || (F>D+1)){
+      inv.ok=false;
+      if(inv.firstBadDay===null) inv.firstBadDay=day;
+    }
+  }
+
+  const years=c.days/365;
+  const avgD=avgDsum/Math.max(c.days,1);
+  const mature=pegs.slice(366), launch=pegs.slice(0,57), postLaunch=pegs.slice(57);
+  return {
+    finalC:C, finalD:D, finalF:F, finalArb:arb, finalDepth:depth,
+    ledgers:{equity, arbProfit, lpFees, lpEmis, protFee, perfFee, debtorFees, redeemVol, mintVol},
+    attr, avgD, years, bid:1-(c.arb_hurdle+c.risk_premium)*c.redemption_days/365,
+    maturePeg: mature.length? mature.reduce((a,b)=>a+b,0)/mature.length : NaN,
+    launchLow: launch.length? Math.min(...launch) : NaN,
+    postLaunchMin: postLaunch.length? Math.min(...postLaunch) : NaN,
+    pMinDaily, pMaxDaily,
+    churn: redeemVol/Math.max(avgD*years,1),
+    churnRatio: redeemVol/Math.max(mintVol,1),
+    invariants:inv,
+    series:{pegs,Cs,Ds,Fs,depths,arbs,lpAprs,arbAprs,looperAprs,cumMint,cumRedeem}
+  };
+}
+
+/* ============================= formatting ============================= */
+function fmtMoney(v){
+  if(!isFinite(v)) return "–";
+  const a=Math.abs(v);
+  if(a>=1e9) return (v/1e9).toFixed(2)+"B";
+  if(a>=1e6) return (v/1e6).toFixed(a>=1e7?0:1)+"M";
+  if(a>=1e3) return (v/1e3).toFixed(0)+"K";
+  return v.toFixed(0);
+}
+function fmtNum(v,dec){
+  if(!isFinite(v)) return "–";
+  const a=Math.abs(v);
+  if(a!==0 && (a<1e-6||a>=1e9)) return v.toExponential(2);
+  return v.toLocaleString("en-US",{minimumFractionDigits:dec,maximumFractionDigits:dec});
+}
+function fmtPeg(v){ return isFinite(v)? v.toFixed(4):"–"; }
+
+/* ============================= controls ============================= */
+const CONTROL_GROUPS=[
+ {name:"Sim & Horizon", open:true, keys:[
+   ["days","days",180,1460,10,"lin",v=>v.toFixed(0)],
+   ["seed","seed",0,99999,1,"int",v=>v.toFixed(0)],
+   ["flow_noise","flow noise ±",0,1,0.005,"lin",v=>(v*100).toFixed(1)+"%"],
+ ]},
+ {name:"Protocol (spec-verified)", open:true, keys:[
+   ["ltv","LTV",0.5,0.95,0.001,"lin",v=>(v*100).toFixed(1)+"%"],
+   ["redemption_days","redemption vest (d)",7,90,1,"lin",v=>v.toFixed(0)],
+   ["protocol_fee","redemption fee (debtor)",0,0.01,0.0001,"lin",v=>(v*100).toFixed(2)+"%"],
+   ["perf_fee","MYT perf fee",0,0.3,0.005,"lin",v=>(v*100).toFixed(1)+"%"],
+   ["dealloc_cap_daily","dealloc cap/day",0.01,0.5,0.005,"lin",v=>(v*100).toFixed(1)+"%"],
+ ]},
+ {name:"Yield & Start State", open:true, keys:[
+   ["myt_yield","MYT yield",0,0.12,0.001,"lin",v=>(v*100).toFixed(2)+"%"],
+   ["initial_equity","initial equity $",1e5,2e7,"log",null,v=>"$"+fmtMoney(v)],
+   ["seed_liquidity_team","team transmuter seed $",0,5e6,"log",null,v=>"$"+fmtMoney(v)],
+   ["initial_depth","initial LP depth $",1e5,1e7,"log",null,v=>"$"+fmtMoney(v)],
+   ["initial_arb","initial defender capital $",1e5,1e7,"log",null,v=>"$"+fmtMoney(v)],
+   ["initial_peg","launch peg",0.95,1.005,0.0005,"lin",v=>v.toFixed(4)],
+ ]},
+ {name:"Peg & Market Making", open:false, keys:[
+   ["impact_k","flow impact k",0.005,0.15,0.001,"lin",v=>v.toFixed(3)],
+   ["sticky_frac","defender sticky frac",0,0.5,0.005,"lin",v=>(v*100).toFixed(1)+"%"],
+   ["risk_premium","risk premium",0,0.08,0.0005,"lin",v=>(v*100).toFixed(2)+"%"],
+   ["peg_max","peg ceiling",1.0,1.02,0.0005,"lin",v=>v.toFixed(4)],
+   ["peg_floor_hard","hard floor",0.5,0.95,0.005,"lin",v=>v.toFixed(3)],
+ ]},
+ {name:"Mint Gate (G1)", open:false, keys:[
+   ["headroom_tap_daily","headroom tap/day",0,1,0.005,"lin",v=>(v*100).toFixed(1)+"%"],
+   ["gate_low","gate low peg",0.8,0.99,0.005,"lin",v=>v.toFixed(3)],
+   ["gate_full","gate full peg",0.9,1.0,0.005,"lin",v=>v.toFixed(3)],
+ ]},
+ {name:"Looper Flows", open:false, keys:[
+   ["deposit_base_daily","organic deposits $/d",0,1e6,"log",null,v=>"$"+fmtMoney(v)],
+   ["deposit_sensitivity","deposit sens $/yr/APR",1e5,5e7,"log",null,v=>"$"+fmtMoney(v)],
+   ["looper_hurdle","looper hurdle APR",0,0.5,0.005,"lin",v=>(v*100).toFixed(1)+"%"],
+   ["exit_sensitivity","exit sens $/yr/APR",1e6,1e8,"log",null,v=>"$"+fmtMoney(v)],
+ ]},
+ {name:"Defenders / Arb (G2)", open:false, keys:[
+   ["arb_hurdle","arb hurdle APR",0,0.15,0.001,"lin",v=>(v*100).toFixed(2)+"%"],
+   ["arb_deploy_daily","arb deploy/day",0,1,0.005,"lin",v=>(v*100).toFixed(1)+"%"],
+   ["arb_inflow_apr","inflow threshold APR",0,0.2,0.001,"lin",v=>(v*100).toFixed(2)+"%"],
+   ["arb_inflow_daily","arb inflow $/d",0,2e6,"log",null,v=>"$"+fmtMoney(v)],
+   ["arb_exit_apr","exit threshold APR",0,0.15,0.001,"lin",v=>(v*100).toFixed(2)+"%"],
+   ["arb_exit_daily","arb exit $/d",0,1e6,"log",null,v=>"$"+fmtMoney(v)],
+ ]},
+ {name:"LP / Aerodrome", open:false, keys:[
+   ["fee_tier","blended fee tier",0,0.003,0.00001,"lin",v=>(v*1e4).toFixed(1)+"bp"],
+   ["emissions_per_day","emissions $/d",0,3e4,"log",null,v=>"$"+fmtMoney(v)],
+   ["lp_alt_apr","LP alt APR",0,0.2,0.001,"lin",v=>(v*100).toFixed(1)+"%"],
+   ["lp_elasticity","LP elasticity /d",0,0.3,0.001,"lin",v=>v.toFixed(3)],
+   ["lp_decay","LP decay /yr",0,1,0.01,"lin",v=>(v*100).toFixed(0)+"%"],
+ ]},
+ {name:"Scenarios", open:false, keys:[
+   ["shock_day","yield shock day",-1,730,1,"int",v=>v<0?"off":("d"+v)],
+   ["shock_yield","shock yield",0,0.05,0.001,"lin",v=>(v*100).toFixed(1)+"%"],
+   ["recovery_day","yield recovery day",-1,730,1,"int",v=>v<0?"off":("d"+v)],
+   ["run_day","panic run day",-1,730,1,"int",v=>v<0?"off":("d"+v)],
+   ["run_frac","run dump frac",0.01,0.5,0.005,"lin",v=>(v*100).toFixed(0)+"%"],
+   ["loss_day","strategy loss day",-1,730,1,"int",v=>v<0?"off":("d"+v)],
+   ["loss_frac","loss frac",0.01,0.5,0.005,"lin",v=>(v*100).toFixed(0)+"%"],
+ ]},
+];
+
+function logmap(t,lo,hi){ return Math.exp(Math.log(lo)+(Math.log(hi)-Math.log(lo))*t); }
+function logunmap(v,lo,hi){ return (Math.log(v)-Math.log(lo))/(Math.log(hi)-Math.log(lo)); }
+
+function buildControls(){
+  const host=document.getElementById("controls");
+  host.innerHTML="";
+  for(const g of CONTROL_GROUPS){
+    const det=document.createElement("details");
+    det.className="grp"; if(g.open) det.open=true;
+    const n=g.keys.length;
+    det.innerHTML=`<summary>${g.name}<span class="cnt">${n}</span></summary>`;
+    const body=document.createElement("div"); body.className="body";
+    for(const [key,label,lo,hi,step,mode,fmt] of g.keys){
+      const ctl=document.createElement("div"); ctl.className="ctl";
+      const lab=document.createElement("label");
+      lab.innerHTML=`<b>${label}</b><span class="val mono" id="v-${key}"></span>`;
+      const valSpan=lab.querySelector(".val");
+      const row=document.createElement("div"); row.className="row";
+      const sl=document.createElement("input");
+      const num=document.createElement("input");
+      num.type="number"; num.id="n-"+key;
+      if(mode==="log"){
+        sl.type="range"; sl.min="0"; sl.max="1"; sl.step="0.001"; sl.id="s-"+key;
+        num.step="any";
+      } else {
+        sl.type="range"; sl.min=String(lo); sl.max=String(hi); sl.step=String(step); sl.id="s-"+key;
+        num.step= mode==="int" ? "1" : String(step);
+      }
+      row.appendChild(sl); row.appendChild(num);
+      ctl.appendChild(lab); ctl.appendChild(row); body.appendChild(ctl);
+
+      const setValLabel=v=>{ valSpan.textContent=fmt?fmt(v):fmtNum(v,3); };
+      const refresh=v=>{
+        setValLabel(v);
+        if(mode==="log"){ if(v>0&&v>=lo&&v<=hi) sl.value=String(logunmap(v,lo,hi)); }
+        else sl.value=String(v);
+        num.value= mode==="int" ? String(Math.round(v)) : String(+v.toPrecision(6));
+      };
+      refresh(P[key]);
+      sl.addEventListener("input",()=>{
+        let v;
+        if(mode==="log") v=logmap(parseFloat(sl.value),lo,hi);
+        else v=parseFloat(sl.value);
+        if(mode==="int") v=Math.round(v);
+        P[key]=v; setValLabel(v); num.value= mode==="int"?String(v):String(+v.toPrecision(6));
+        render();
+      });
+      num.addEventListener("input",()=>{
+        let v=parseFloat(num.value);
+        if(!isFinite(v)) return;
+        v=Math.min(Math.max(v,lo),hi);
+        if(mode==="int") v=Math.round(v);
+        P[key]=v; refresh(v);
+        render();
+      });
+    }
+    // cold-start toggle at top of Start-State group
+    if(g.name==="Yield & Start State"){
+      const t=document.createElement("div"); t.className="tgl";
+      t.innerHTML=`<span>cold start (no defenders)</span>`;
+      const cb=document.createElement("input"); cb.type="checkbox"; cb.id="n-cold_start";
+      cb.checked=!!P.cold_start;
+      cb.addEventListener("input",()=>{ P.cold_start=cb.checked; render(); });
+      t.appendChild(cb); body.prepend(t);
+    }
+    det.appendChild(body); host.appendChild(det);
+  }
+}
+
+function syncControls(){
+  for(const g of CONTROL_GROUPS) for(const [key] of g.keys){
+    const num=document.getElementById("n-"+key);
+    const lab=document.getElementById("v-"+key);
+    if(num) num.value=String(P[key]);
+    if(lab){
+      const k=g.keys.find(x=>x[0]===key);
+      lab.textContent=k[6]?k[6](P[key]):fmtNum(P[key],3);
+    }
+  }
+  const cb=document.getElementById("n-cold_start");
+  if(cb) cb.checked=!!P.cold_start;
+}
+
+/* ============================= charts ============================= */
+const charts={};
+const GRID={color:"#1f2b24"};
+const TICK={color:"#7d938a",font:{size:10,family:"ui-monospace,Menlo,monospace"}};
+function baseOpts(yTitle,extra){
+  return Object.assign({
+    responsive:true, maintainAspectRatio:false, animation:false,
+    parsing:false,
+    interaction:{mode:"nearest",intersect:false},
+    plugins:{legend:{labels:{color:"#7d938a",boxWidth:12,font:{size:10}}}},
+    scales:{
+      x:{type:"linear",title:{display:false},grid:GRID,ticks:Object.assign({maxTicksLimit:9,callback:v=> "d"+v},TICK)},
+      y:{grid:GRID,ticks:Object.assign({},TICK),title:{display:!!yTitle,text:yTitle||"",color:"#7d938a",font:{size:10}}}
+    }
+  },extra||{});
+}
+function ds(label,color,data,extra){
+  return Object.assign({label,data,borderColor:color,backgroundColor:color,
+    borderWidth:1.6,pointRadius:0,tension:0.15,fill:false},extra||{});
+}
+const xy=(arr)=>arr.map((v,i)=>({x:i,y:v}));
+
+function buildCharts(R){
+  const days=R.series.pegs.length;
+  // PEG
+  const bidPts=[{x:0,y:R.bid},{x:days-1,y:R.bid}];
+  const pegData=[ds("peg","#39d353",xy(R.series.pegs)),
+                 ds("T-bill bid","#f0b72f",bidPts,{borderDash:[6,4],borderWidth:1.2,pointRadius:0,tension:0})];
+  // SIZE
+  const sizeData=[ds("collateral C","#58a6ff",xy(R.series.Cs)),
+                  ds("debt D","#bc8cff",xy(R.series.Ds)),
+                  ds("float F","#f0b72f",xy(R.series.Fs))];
+  // LIQ
+  const liqData=[ds("LP depth","#39d353",xy(R.series.depths)),
+                 ds("defender capital","#ff7b72",xy(R.series.arbs))];
+  // APR
+  const aprData=[ds("LP APR","#39d353",xy(R.series.lpAprs)),
+                 ds("arb APR","#f0b72f",xy(R.series.arbAprs)),
+                 ds("looper APR","#58a6ff",xy(R.series.looperAprs))];
+  // CHURN
+  const churnData=[ds("cum minted","#bc8cff",xy(R.series.cumMint)),
+                   ds("cum redeemed","#39d353",xy(R.series.cumRedeem))];
+
+  const pegY={min:Math.max(0.88,Math.min(R.pMinDaily,0.99)-0.008), max:Math.max(1.002,R.pMaxDaily+0.002),
+              ticks:Object.assign({callback:v=>v.toFixed(3)},TICK)};
+  const moneyY={ticks:Object.assign({callback:v=>"$"+v+"M"},TICK)};
+  const aprY={ticks:Object.assign({callback:v=>v+"%"},TICK)};
+
+  const defs=[
+    ["c-peg",pegData,{scales:{x:{type:"linear",grid:GRID,ticks:Object.assign({maxTicksLimit:9,callback:v=>"d"+v},TICK)},y:Object.assign({},baseOpts().scales.y,pegY)}}],
+    ["c-size",sizeData,{scales:{x:{type:"linear",grid:GRID,ticks:Object.assign({maxTicksLimit:9,callback:v=>"d"+v},TICK)},y:Object.assign({},baseOpts().scales.y,moneyY)}}],
+    ["c-liq",liqData,{scales:{x:{type:"linear",grid:GRID,ticks:Object.assign({maxTicksLimit:9,callback:v=>"d"+v},TICK)},y:Object.assign({},baseOpts().scales.y,moneyY)}}],
+    ["c-apr",aprData,{scales:{x:{type:"linear",grid:GRID,ticks:Object.assign({maxTicksLimit:9,callback:v=>"d"+v},TICK)},y:Object.assign({},baseOpts().scales.y,aprY)}}],
+    ["c-churn",churnData,{scales:{x:{type:"linear",grid:GRID,ticks:Object.assign({maxTicksLimit:9,callback:v=>"d"+v},TICK)},y:Object.assign({},baseOpts().scales.y,moneyY)}}],
+  ];
+  for(const [id,data,extra] of defs){
+    if(charts[id]) charts[id].destroy();
+    const el=document.getElementById(id);
+    charts[id]=new Chart(el,{type:"line",data:{datasets:data},options:baseOpts("",extra)});
+  }
+}
+
+/* ============================= render ============================= */
+let LAST=null;
+function render(){
+  const R=runSimRaw(P);
+  LAST=R;
+  // invariant banner
+  const flag=document.getElementById("inv-flag");
+  if(!R.invariants.ok){
+    flag.style.display="block";
+    flag.textContent=`⚠ SOLVENCY INVARIANT BREACH from day ${R.invariants.firstBadDay} — worst D/C ${R.invariants.worstDoverC.toFixed(4)}, float breach ${fmtMoney(R.invariants.worstFbreach)}. This run is mechanically broken (python would assert).`;
+  } else flag.style.display="none";
+
+  // stat cards
+  document.getElementById("s-peg").textContent=fmtPeg(R.maturePeg);
+  document.getElementById("s-bid").textContent=fmtPeg(R.bid);
+  document.getElementById("s-low").textContent=fmtPeg(R.launchLow);
+  document.getElementById("s-min").textContent=fmtPeg(R.pMinDaily);
+  document.getElementById("s-churn").textContent=R.churn.toFixed(1);
+  document.getElementById("s-churnvol").textContent="$"+fmtMoney(R.ledgers.redeemVol);
+  document.getElementById("s-supply").textContent="$"+fmtMoney(R.finalD);
+  document.getElementById("s-float").textContent="$"+fmtMoney(R.finalF);
+  document.getElementById("s-c").textContent="$"+fmtMoney(R.finalC);
+  document.getElementById("s-c0").textContent="$"+fmtMoney(P.initial_equity+P.seed_liquidity_team);
+  document.getElementById("s-arb").textContent="$"+fmtMoney(R.finalArb);
+  document.getElementById("s-arbp").textContent="$"+fmtMoney(R.ledgers.arbProfit);
+  document.getElementById("attr-line").textContent=
+    `mints $${fmtMoney(R.ledgers.mintVol)} = replacement $${fmtMoney(R.attr.replacement)} + yield-conv $${fmtMoney(R.attr.yield)} + equity-conv $${fmtMoney(R.attr.equity)} · churn ratio (redeem/mint) ${R.churnRatio.toFixed(2)}`;
+
+  buildCharts(R);
+  syncControls();
+
+  // debug/verification handle
+  window.__lab={P, DEFAULTS, run:runSimRaw, result:R, bid:R.bid, series:R.series,
+                invariants:R.invariants, presets:PRESETS, charts};
+}
+
+/* ============================= wiring ============================= */
+function applyPreset(name){
+  CUR_PRESET=name;
+  P={...DEFAULTS, ...(PRESETS[name]?PRESETS[name].ov:{})};
+  document.querySelectorAll(".presets button").forEach(b=>
+    b.classList.toggle("active", b.dataset.p===name));
+  buildControls();
+  render();
+}
+document.querySelectorAll(".presets button").forEach(b=>
+  b.addEventListener("click",()=>applyPreset(b.dataset.p)));
+document.getElementById("runBtn").addEventListener("click",render);
+
+buildControls();
+render();
+</script>
+</body>
+</html>
