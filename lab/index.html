@@ -118,7 +118,7 @@
   <div class="cards">
     <div class="card"><div class="k">mature peg (yr 2)</div><div class="v mono" id="s-peg">–</div><div class="s">bid <span id="s-bid" class="mono">–</span></div></div>
     <div class="card"><div class="k">launch low (8wk)</div><div class="v mono" id="s-low">–</div><div class="s">daily min <span id="s-min" class="mono">–</span></div></div>
-    <div class="card"><div class="k">churn</div><div class="v mono" id="s-churn">–</div><div class="s">cycles/yr · <span id="s-churnvol" class="mono">–</span> vol · float buys <span id="s-fbuys" class="mono">–</span></div></div>
+    <div class="card"><div class="k">churn</div><div class="v mono" id="s-churn">–</div><div class="s">cycles/yr · structural cap 13.03 · float buys <span id="s-fbuys" class="mono">–</span></div></div>
     <div class="card"><div class="k">supply D (2yr)</div><div class="v mono" id="s-supply">–</div><div class="s">float <span id="s-float" class="mono">–</span></div></div>
     <div class="card"><div class="k">collateral C</div><div class="v mono" id="s-c">–</div><div class="s">from <span id="s-c0" class="mono">–</span> start</div></div>
     <div class="card"><div class="k">defender capital</div><div class="v mono" id="s-arb">–</div><div class="s">arb profit <span id="s-arbp" class="mono">–</span></div></div>
@@ -747,7 +747,6 @@ function render(){
   document.getElementById("s-low").textContent=fmtPeg(R.launchLow);
   document.getElementById("s-min").textContent=fmtPeg(R.pMinDaily);
   document.getElementById("s-churn").textContent=R.churn.toFixed(1);
-  document.getElementById("s-churnvol").textContent="$"+fmtMoney(R.ledgers.redeemVol);
   document.getElementById("s-fbuys").textContent="$"+fmtMoney(R.ledgers.floatBuys);
   document.getElementById("s-supply").textContent="$"+fmtMoney(R.finalD);
   document.getElementById("s-float").textContent="$"+fmtMoney(R.finalF);
