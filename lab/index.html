@@ -73,6 +73,14 @@
   .ctl label { display:flex; justify-content:space-between; font-size:11.5px; color:var(--dim); margin-bottom:3px; }
   .ctl label b { color:var(--text); font-weight:500; }
   .ctl .val { color:var(--amber); }
+  .lleft { display:flex; gap:6px; align-items:baseline; min-width:0; }
+  .info { position:relative; cursor:help; color:var(--dim); font-size:10.5px; flex:none; }
+  .info:hover { color:var(--accent); }
+  .info .tip { display:none; position:absolute; left:-2px; top:16px; width:240px; background:#0a100c;
+    border:1px solid var(--accent); border-radius:8px; padding:8px 10px; font-size:11px; line-height:1.45;
+    color:var(--text); z-index:60; box-shadow:0 6px 22px rgba(0,0,0,.55); font-weight:400; }
+  .info .tip b { color:var(--amber); }
+  .info:hover .tip { display:block; }
   .row { display:flex; gap:6px; align-items:center; }
   input[type=range] { flex:1; appearance:none; height:3px; background:var(--border); border-radius:2px; outline:none; }
   input[type=range]::-webkit-slider-thumb { appearance:none; width:12px; height:12px; border-radius:50%; background:var(--accent); cursor:pointer; }
@@ -102,7 +110,7 @@
 <body>
 <header>
   <h1>alUSDb Base — Loop Mechanics Lab</h1>
-  <span class="chip">rev v2.2</span>
+  <span class="chip">rev v2.3</span>
   <span class="rev">daily-timestep port of base_loop_sim.py · debtor-side redemption fee · no borrower interest · 28d linear vest · DAO fee-economics layer</span>
 </header>
 <div class="wrap">
@@ -449,6 +457,64 @@ function fmtNum(v,dec){
 }
 function fmtPeg(v){ return isFinite(v)? v.toFixed(4):"–"; }
 
+/* ============================= param help (hover tooltips) ============================= */
+const PARAM_HELP={
+ days:"Simulation length in days (730 = 2 years). All yr-2 cards read the trailing 365 days ending here.",
+ seed:"Deterministic RNG seed for flow noise. Same seed = identical run; change it to sample another noise realization.",
+ flow_noise:"± fractional noise on daily deposit/arb flows (30% = flows vary randomly ±30%/day). 0 = deterministic — the Laffer sweeps always run at 0.",
+ ltv:"Max debt as a fraction of collateral (90% on Base). Sets the looping multiplier: 1/(1−LTV×peg) ≈ 9–10x.",
+ redemption_days:"Transmuter vest length in days (28 = 4 weeks on Base). Sets the structural churn cap (365/28 = 13.03/yr) and the equilibrium discount via T-bill parity.",
+ protocol_fee:"Debtor-side redemption fee (protocolFee). Paid by the debtor whose collateral serves the redemption — the redeemer always gets the full 1:1. 10bp on Base; 25bp existing deployments.",
+ perf_fee:"MYT performance fee — the DAO's cut of strategy yield. The primary revenue stream; live deployments run 15%.",
+ dealloc_cap_daily:"Max fraction of collateral the allocator can pull from strategies per day (10%). The run circuit-breaker: bounds redemption payout throughput in a panic.",
+ dao_fixed_cost:"DAO overhead charged against Base revenue (audits, dev, ops). Draws the break-even line on the Laffer charts and the net card. BE's calibration: $300k/yr.",
+ myt_yield:"Gross MYT strategy yield on collateral. Compounds daily net of the perf fee; the headroom it creates is what loopers lever ~9x. Scoopy's projection: 5% (Morpho menu 4.3–5.9%).",
+ initial_equity:"Day-0 USDC deposited by loopers into the MYT vault.",
+ seed_liquidity_team:"Team USDC seeded into the transmuter so early redemptions always pay (confidence backstop). Counts as collateral.",
+ initial_depth:"Seed LP depth ($) in the USDC/alUSDb pools at launch.",
+ initial_arb:"Peg-defender capital idle and ready at launch. Provides resting bids near the peg and standing float capture.",
+ initial_peg:"Starting market peg (0.999 = launching near par).",
+ cold_start:"Launch with no defenders: thin arb capital + depth, reduced sticky demand, +3% risk premium. The worst-case launch path.",
+ impact_k:"Price-impact constant: net flow $X on depth $Y moves the peg ≈ k·X/Y. Calibrated 0.035 ($500k on $4M depth ≈ 0.44% dip).",
+ sticky_frac:"Fraction of defender buys held forever as real end-demand for alUSDb (never redeemed) — the net-expansion channel.",
+ risk_premium:"Extra yield defenders demand over T-bills for a young deployment. Shifts the passive bid: 0 = 0.9962 (pure parity); +275bp ≈ 0.9941 (scoopy's band).",
+ peg_max:"Hard ceiling on the peg — mint-and-sell caps any premium near here.",
+ peg_floor_hard:"Hard floor clamp on the peg (sanity bound).",
+ headroom_tap_daily:"Fraction of re-opened borrow headroom loopers tap per day. 35%/d = aggressive same-week re-levering.",
+ gate_low:"Peg below which loopers stop minting entirely — selling face value at a deep discount is bad business.",
+ gate_full:"Peg at/above which loopers tap headroom at the full rate.",
+ deposit_base_daily:"Organic deposit inflow $/day regardless of APR.",
+ deposit_sensitivity:"Extra deposits $/yr per point of looper APR over the hurdle. The looping-inflow half of the system bottleneck.",
+ looper_hurdle:"Equity APR loopers require to deploy capital. Raise toward 30% to surface a Laffer peak — at 10x leverage a low hurdle keeps loopers profitable at any fee.",
+ exit_sensitivity:"Equity outflow $/yr per point of looper APR below the hurdle.",
+ arb_hurdle:"Risk-free anchor for the defender bid: p_bid = 1 − (this + risk premium) × 28/365. T-bills 5% ⇒ 0.9962.",
+ arb_deploy_daily:"Fraction of defender capital deployable per day — how fast bids respond to a discount.",
+ arb_inflow_apr:"Redemption APR at/above which external T-bill capital migrates in. The defender-inflow half of the system bottleneck.",
+ arb_inflow_daily:"Fresh defender capital $/day while the trade is juicy. Crank toward $1M/d to see near-max transmuter usage against the 13.03/yr structural cap.",
+ arb_exit_apr:"Redemption APR below which defender capital starts leaving.",
+ arb_exit_daily:"Defender capital withdrawal $/day when the trade is unattractive.",
+ float_capture_apr:"Minimum redemption APR for standing float capture: at/above it, arb desks continuously buy float and queue the 28d vest — the churn engine. 5.5% ≈ T-bill + 50bp.",
+ float_capture_rate:"Fraction of outstanding float capture attempts per day (capital permitting). 10%/d = float turns over roughly every 10 days unconstrained.",
+ equity_exit_frac:"Fraction of freed looper equity withdrawn at redemption maturity (profit-take). The only leak from an otherwise releverable position — behavior dial, not a system mechanic.",
+ lp_track:"Speed at which depth relaxes toward its volume-implied target (1.5%/day = adjusts over months).",
+ emissions_depth_weight:"How much emission-supported depth is real (mercenary AERO LPs unbind when incentives move; fee income is the sticky base). 35%.",
+ lp_alusdb_share:"alUSDb side of pool depth: each $1 of depth growth parks this much alUSDb out of the float. The pools are a churn sink — alUSDb in a pool is alUSDb not in the transmuter.",
+ lending_sink_rate:"Fraction of float absorbed per day into lending markets (Euler-style). The lindy sink.",
+ emissions_cost_dao:"0 = veAERO-directed (NOT a DAO cash cost — the Base plan: ~$2M veAERO voting two pools, 80% weight on the stable). 1 = emissions bought with cash and subtracted from DAO net.",
+ fee_tier:"Blended swap fee on pool volume (3bp ≈ stable-pool blend across the two Aerodrome pools).",
+ emissions_per_day:"$/day of AERO emissions directed to the pools via veAERO votes.",
+ lp_alt_apr:"LP opportunity cost — the hurdle income must clear to hold depth (6% Base stables).",
+ lp_elasticity:"Depth growth per day per point of LP APR over the alternative.",
+ lp_decay:"Yearly fraction of depth that leaves when LP APR is under the alternative.",
+ shock_day:"Day the MYT yield shock starts (−1 = off).",
+ shock_yield:"MYT yield during the shock window.",
+ recovery_day:"Day the MYT yield returns to normal.",
+ run_day:"Day of a panic run: a fraction of the float dumps at market (−1 = off).",
+ run_frac:"Fraction of float sold in the panic run.",
+ loss_day:"Day of MYT strategy principal impairment — the only true tail risk (−1 = off).",
+ loss_frac:"Fraction of collateral vaporized instantly. Breaks 1:1 backing if large; redemptions then burn debt against impaired collateral.",
+};
+
 /* ============================= controls ============================= */
 const CONTROL_GROUPS=[
  {name:"Sim & Horizon", open:true, keys:[
@@ -541,7 +607,8 @@ function buildControls(){
     for(const [key,label,lo,hi,step,mode,fmt] of g.keys){
       const ctl=document.createElement("div"); ctl.className="ctl";
       const lab=document.createElement("label");
-      lab.innerHTML=`<b>${label}</b><span class="val mono" id="v-${key}"></span>`;
+      const help=(PARAM_HELP[key]||"").replace(/"/g,"&quot;");
+      lab.innerHTML=`<span class="lleft"><span class="info" aria-label="info">ⓘ<span class="tip">${help}</span></span><b>${label}</b></span><span class="val mono" id="v-${key}"></span>`;
       const valSpan=lab.querySelector(".val");
       const row=document.createElement("div"); row.className="row";
       const sl=document.createElement("input");
@@ -585,7 +652,8 @@ function buildControls(){
     // cold-start toggle at top of Start-State group
     if(g.name==="Yield & Start State"){
       const t=document.createElement("div"); t.className="tgl";
-      t.innerHTML=`<span>cold start (no defenders)</span>`;
+      const help=(PARAM_HELP["cold_start"]||"").replace(/"/g,"&quot;");
+      t.innerHTML=`<span class="lleft"><span class="info">ⓘ<span class="tip">${help}</span></span><span>cold start (no defenders)</span></span>`;
       const cb=document.createElement("input"); cb.type="checkbox"; cb.id="n-cold_start";
       cb.checked=!!P.cold_start;
       cb.addEventListener("input",()=>{ P.cold_start=cb.checked; render(); });
