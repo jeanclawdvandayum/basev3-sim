@@ -258,13 +258,20 @@ function runSimRaw(cfg){
     } else { C+=net; equity+=net; }
 
     // 3) MINT / LOOP with G1 mint gate + resting-bid clearing
+    //    Carry-aware gate: a looper eats a discount up to ~2 weeks of levered
+    //    carry (fat APR -> less peg-sensitive, as in reality).
     const H=Math.max(0, c.ltv*C-D);
-    const gate=Math.pow(clamp((p-c.gate_low)/(c.gate_full-c.gate_low),0,1),1.5);
+    const tol=clamp(looperApr/365*14, 0, 0.05);
+    const gate=Math.pow(clamp((p+tol-c.gate_low)/(c.gate_full-c.gate_low),0,1),1.5);
     const m=H*c.headroom_tap_daily*gate;
     const p_bid=1-(c.arb_hurdle+c.risk_premium)*c.redemption_days/365;
     const eq_disc=1-p_bid;
     const effDepth=depth+Math.min(arb*0.5, depth*2.0);   // defender quotes add depth
-    const bidCap=Math.min(arb*c.arb_deploy_daily, eq_disc*effDepth/c.impact_k*1.5);
+    // Discount-scaled absorption: the VISIBLE discount sizes the book
+    // defenders will cross — extra loop-flow settles into the float at a
+    // mildly wider discount, not into a collapsed price.
+    const actDisc=Math.max(eq_disc, 1-p);
+    const bidCap=Math.min(arb*c.arb_deploy_daily, actDisc*effDepth/c.impact_k*1.5);
     let taken=0, excess=0;
     if(m>0){
       const liftCap=Math.max(0,(p_bid-p))/p*effDepth/c.impact_k;
@@ -327,7 +334,13 @@ function runSimRaw(cfg){
     }
 
     ema+=0.10*(discount-ema);
-    if(ema>eq_disc*1.1 && arbApr>=c.arb_inflow_apr) arb+=c.arb_inflow_daily*Math.min(4, ema/eq_disc)*nz;
+    // APR-spread migration: 2x APR over threshold = 4x daily inflow (deep
+    // discounts recruit fixed-income capital fast). Keeps d(peg)/d(yield)
+    // shallow — flow settles into the float, not the price.
+    if(ema>eq_disc*1.1 && arbApr>=c.arb_inflow_apr){
+      const mult=Math.min(50, Math.pow(arbApr/c.arb_inflow_apr,2));
+      arb+=c.arb_inflow_daily*mult*nz;
+    }
     else if(arbApr<c.arb_exit_apr && arb>2e5) arb-=Math.min(arb*0.01, c.arb_exit_daily);
 
     // 5) VESTING PAYOUT (G3): linear drip over 28d, capped by deallocation cap
@@ -481,18 +494,18 @@ const PARAM_HELP={
  peg_max:"Hard ceiling on the peg — mint-and-sell caps any premium near here.",
  peg_floor_hard:"Hard floor clamp on the peg (sanity bound).",
  headroom_tap_daily:"Fraction of re-opened borrow headroom loopers tap per day. 35%/d = aggressive same-week re-levering.",
- gate_low:"Peg below which loopers stop minting entirely — selling face value at a deep discount is bad business.",
- gate_full:"Peg at/above which loopers tap headroom at the full rate.",
- deposit_base_daily:"Organic deposit inflow $/day regardless of APR.",
- deposit_sensitivity:"Extra deposits $/yr per point of looper APR over the hurdle. The looping-inflow half of the system bottleneck.",
+  gate_low:"Peg below which loopers stop minting entirely — selling face value at a deep discount is bad business. Carry-aware: loopers tolerate a discount up to ~2 weeks of levered carry, so a fat MYT yield pushes this floor DOWN (they become less peg-sensitive).",
+  gate_full:"Peg at/above which loopers tap headroom at the full rate (shifted by the same carry tolerance).",
+  arb_inflow_daily:"Fresh defender capital $/day at the migration threshold. Scales QUADRATICALLY with the APR spread: 2x APR over threshold = 4x inflow — deep discounts recruit fixed-income capital fast, which is what keeps the peg from collapsing when yield (and thus sell-flow) rises. Crank toward $1M/d to see near-max transmuter usage against the 13.03/yr structural cap.",
+  deposit_base_daily:"Organic deposit inflow $/day regardless of APR.",
+  deposit_sensitivity:"Extra deposits $/yr per point of looper APR over the hurdle. The looping-inflow half of the system bottleneck.",
  looper_hurdle:"Equity APR loopers require to deploy capital. Raise toward 30% to surface a Laffer peak — at 10x leverage a low hurdle keeps loopers profitable at any fee.",
  exit_sensitivity:"Equity outflow $/yr per point of looper APR below the hurdle.",
  arb_hurdle:"Risk-free anchor for the defender bid: p_bid = 1 − (this + risk premium) × 28/365. T-bills 5% ⇒ 0.9962.",
  arb_deploy_daily:"Fraction of defender capital deployable per day — how fast bids respond to a discount.",
- arb_inflow_apr:"Redemption APR at/above which external T-bill capital migrates in. The defender-inflow half of the system bottleneck.",
- arb_inflow_daily:"Fresh defender capital $/day while the trade is juicy. Crank toward $1M/d to see near-max transmuter usage against the 13.03/yr structural cap.",
- arb_exit_apr:"Redemption APR below which defender capital starts leaving.",
- arb_exit_daily:"Defender capital withdrawal $/day when the trade is unattractive.",
+  arb_inflow_apr:"Redemption APR at/above which external T-bill capital migrates in. The defender-inflow half of the system bottleneck.",
+  arb_exit_apr:"Redemption APR below which defender capital starts leaving.",
+  arb_exit_daily:"Defender capital withdrawal $/day when the trade is unattractive.",
  float_capture_apr:"Minimum redemption APR for standing float capture: at/above it, arb desks continuously buy float and queue the 28d vest — the churn engine. 5.5% ≈ T-bill + 50bp.",
  float_capture_rate:"Fraction of outstanding float capture attempts per day (capital permitting). 10%/d = float turns over roughly every 10 days unconstrained.",
  equity_exit_frac:"Fraction of freed looper equity withdrawn at redemption maturity (profit-take). The only leak from an otherwise releverable position — behavior dial, not a system mechanic.",

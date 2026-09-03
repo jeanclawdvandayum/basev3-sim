@@ -241,8 +241,12 @@ def run(cfg: Config, collect_path=True) -> dict:
             led['new_equity'] += net_dep
 
         # 3) MINT / LOOP with the G1 mint gate: price-elastic looping.
+        #    Carry-aware: a looper will eat a discount up to ~2 weeks of
+        #    levered carry (fat APR -> less peg-sensitive, as in reality).
         H = max(0.0, c.ltv * C - D)
-        gate = clamp((p - c.gate_low) / (c.gate_full - c.gate_low), 0.0, 1.0) ** 1.5
+        tol = clamp(looper_apr / 365 * 14, 0.0, 0.05)
+        gate = clamp((p + tol - c.gate_low) /
+                     (c.gate_full - c.gate_low), 0.0, 1.0) ** 1.5
         m = H * c.headroom_tap_daily * gate
         # Passive-bid market: peg defenders quote at their T-bill indifference
         # price p_bid = 1 - (r_f + risk premium) * 28/365 ~= 0.996. Defender
@@ -253,8 +257,14 @@ def run(cfg: Config, collect_path=True) -> dict:
         p_bid = 1 - (c.arb_hurdle + c.risk_premium) * c.redemption_days / 365
         eq_disc = 1 - p_bid
         eff_depth = depth + min(arb * 0.5, depth * 2.0)
+        # Discount-scaled absorption: when the peg is BELOW the bid, the
+        # visible discount (not the equilibrium one) sizes the book defenders
+        # will cross. At 1.5% discount the daily absorption capacity is ~4x
+        # the parity-priced book — extra loop-flow goes into the FLOAT, not
+        # the PRICE. This is what keeps d(peg)/d(yield) shallow.
+        act_disc = max(eq_disc, 1.0 - p)
         bid_cap = min(arb * c.arb_deploy_daily,
-                      eq_disc * eff_depth / c.impact_k * 1.5)
+                      act_disc * eff_depth / c.impact_k * 1.5)
         # Market clearing with resting bids:
         #  1. if market < bid, incoming mint flow clears INTO the bid book,
         #     gapping price back up toward p_bid, capacity-bound
@@ -331,10 +341,16 @@ def run(cfg: Config, collect_path=True) -> dict:
                 led['float_buys'] += buy_f
 
         # arb capital elasticity: T-bill capital migrates on PERSISTENT
-        # under-capacity (fast ~10d EMA: scoopy says the response is quick)
+        # under-capacity, scaling with the APR SPREAD over the migration
+        # threshold (a 2x APR = 4x daily migration: deep discounts recruit
+        # fixed-income capital fast — at 13% vs 6.5% threshold the flood
+        # is 4x, at 26% it is 16x). This keeps d(peg)/d(yield) shallow:
+        # extra loop-flow settles into the FLOAT at a mildly wider
+        # discount, not into a collapsed price.
         ema_disc = ema_disc + 0.10 * (discount - ema_disc)
         if ema_disc > eq_disc * 1.1 and arb_apr >= c.arb_inflow_apr:
-            arb += c.arb_inflow_daily * min(4.0, ema_disc / eq_disc) * noise
+            mult = min(50.0, (arb_apr / c.arb_inflow_apr) ** 2)
+            arb += c.arb_inflow_daily * mult * noise
         elif arb_apr < c.arb_exit_apr and arb > 200_000:
             arb -= min(arb * 0.01, c.arb_exit_daily)
 
