@@ -107,11 +107,24 @@ class Config:
 
     # --- LP / Aerodrome ---
     fee_tier: float = 0.0003         # blended 3bp on churn volume
-    emissions_per_day: float = 3_000 # $/day emissions directed to our pools
+    emissions_per_day: float = 3000  # $/day emissions directed to our pools
     lp_alt_apr: float = 0.06         # LP opportunity cost on Base stables
     lp_elasticity: float = 0.08      # depth fraction/day attracted per APR gap
     lp_decay: float = 0.30           # yearly depth fraction leaving when
                                      # APR < alternative (passive churn-out)
+    lp_track: float = 0.015          # depth relaxation/day toward the
+                                     # volume-implied target (depth = income
+                                     # / lp hurdle — BE's depth = LP income/r)
+    emissions_depth_weight: float = 0.35  # fraction of emission-supported
+                                     # depth that is real (mercenary capital
+                                     # unbuttons; fees are the sticky base)
+
+    # --- standing float capture (the churn engine) ---
+    float_capture_apr: float = 0.055  # arb APR needed to buy float at the
+                                      # peg and queue redemption
+    float_capture_rate: float = 0.10  # frac of float/day arbs try to absorb
+    equity_exit_frac: float = 0.05    # frac of freed looper equity withdrawn
+                                      # at redemption maturity (profit-take)
 
     # --- scenario switches (all default off) ---
     cold_start: bool = False         # thin arb capital + thin absorption
@@ -166,7 +179,8 @@ def run(cfg: Config, collect_path=True) -> dict:
 
     led = dict(new_equity=0.0, arb_profit=0.0, lp_fees=0.0, lp_emissions=0.0,
                protocol_fee=0.0, perf_fee=0.0, debtor_fee_paid=0.0,
-               redeem_vol=0.0, mint_vol=0.0, gross_yield=0.0)
+               redeem_vol=0.0, mint_vol=0.0, gross_yield=0.0,
+               equity_exit=0.0, float_buys=0.0, pool_volume=0.0)
     path = []
     myt = c.myt_yield
     # daily DAO revenue streams (for trailing-annual series)
@@ -287,6 +301,23 @@ def run(cfg: Config, collect_path=True) -> dict:
         discount = 1.0 - p
         arb_apr = discount * 365 / c.redemption_days
 
+        # 4c) STANDING FLOAT CAPTURE — the churn engine. With a persistent
+        #     discount, arb desks continuously buy float and queue it for the
+        #     28d vest. Capital-bound: each buy locks capital until payout,
+        #     so churn is a function of defender capital supply.
+        buy_f = 0.0
+        if arb_apr >= c.float_capture_apr and F > 0 and arb > 0:
+            want = F * c.float_capture_rate
+            room = arb * c.arb_deploy_daily * 0.5
+            buy_f = min(want, room, F)
+            if buy_f > 0:
+                arb -= buy_f * p                       # capital locked in vest
+                F -= buy_f
+                vesting.append([day, buy_f])
+                p = min(p_bid, p + buy_f / eff_depth * c.impact_k * p)
+                led['arb_profit'] += buy_f * (1 - p)
+                led['float_buys'] += buy_f
+
         # arb capital elasticity: T-bill capital migrates on PERSISTENT
         # under-capacity (fast ~10d EMA: scoopy says the response is quick)
         ema_disc = ema_disc + 0.10 * (discount - ema_disc)
@@ -303,6 +334,12 @@ def run(cfg: Config, collect_path=True) -> dict:
         if pay > 0:
             C -= pay * (1 + c.protocol_fee)       # fee extracted from debtors
             D -= pay                              # burned liability
+            # redemption maturity frees looper equity: a fraction is
+            # withdrawn (profit-take) instead of silently re-looped —
+            # this is the shrink half of the deposit pulse
+            eq_x = min(pay * c.equity_exit_frac, C * 0.02)
+            C -= eq_x
+            led['equity_exit'] += eq_x
             led['protocol_fee'] += pay * c.protocol_fee
             led['debtor_fee_paid'] += pay * c.protocol_fee
             rev_prot_daily[-1] += pay * c.protocol_fee
@@ -317,13 +354,21 @@ def run(cfg: Config, collect_path=True) -> dict:
             p = clamp(p - min(0.002, backlog / max(F, 1) * 0.01),
                       c.peg_floor_hard, c.peg_max)
 
-        # 6) LP ECONOMICS: fees on churn volume + directed emissions
-        vol = m
+        # 6) LP ECONOMICS: depth is a function of VOLUME. Pool fees accrue on
+        #    every swap leg (mint sells + standing float buys + exit re-buys),
+        #    and depth relaxes toward the income-implied target
+        #    depth* = (fees + w*emissions) / lp hurdle  — BE's depth = income/r.
+        exit_buy = repay if net_dep < 0 else 0.0   # alUSD bought to exit
+        vol = m + buy_f + exit_buy
         fees = vol * c.fee_tier
-        lp_apr = (fees + c.emissions_per_day) * 365 / max(depth, 1)
+        income_ann = (fees + c.emissions_per_day) * 365
+        target_depth = ((fees * 365) + c.emissions_per_day * 365
+                        * c.emissions_depth_weight) / c.lp_alt_apr
+        lp_apr = income_ann / max(depth, 1)
         led['lp_fees'] += fees
         led['lp_emissions'] += c.emissions_per_day
-        depth += fees + c.emissions_per_day
+        led['pool_volume'] += vol
+        depth += (target_depth - depth) * c.lp_track
         depth += depth * c.lp_elasticity * (lp_apr - c.lp_alt_apr) / 365
         if lp_apr < c.lp_alt_apr:
             depth -= depth * c.lp_decay / 365
@@ -351,7 +396,10 @@ def run(cfg: Config, collect_path=True) -> dict:
                              arb=round(arb / 1e6, 2), depth=round(depth / 1e6, 2),
                              lp_apr=round(lp_apr * 100, 1),
                              arb_apr=round(arb_apr * 100, 1),
-                             looper_apr=round(looper_apr * 100, 1)))
+                             looper_apr=round(looper_apr * 100, 1),
+                             dep=round(net_dep / 1e3, 1),
+                             red=round(pay / 1e3, 1),
+                             buyf=round(buy_f / 1e3, 1)))
 
         # solvency invariants (hard-fail on bug, never in a healthy run)
         p_min_daily = min(p_min_daily, p)
@@ -468,7 +516,10 @@ def main():
         print(f"  mints ${L['mint_vol']/1e6:6.1f}M = replacement ${A['replacement']/1e6:5.1f}M"
               f" + yield-conv ${A['yield']/1e6:5.1f}M + equity-conv ${A['equity']/1e6:5.1f}M")
         print(f"  redeemed ${s['redeems']/1e6:5.1f}M | churn {s['churn_cycles']:.1f} "
-              f"cycles/yr | new equity ${L['new_equity']/1e6:5.1f}M")
+              f"cycles/yr | new equity ${L['new_equity']/1e6:5.1f}M "
+              f"| float bought ${L['float_buys']/1e6:5.1f}M "
+              f"| equity exit ${L['equity_exit']/1e6:5.1f}M "
+              f"| pool vol ${L['pool_volume']/1e6:5.1f}M")
         print(f"  LP: fees ${L['lp_fees']/1e3:5.0f}K + emissions "
               f"${L['lp_emissions']/1e3:5.0f}K | arb profit ${L['arb_profit']/1e3:6.0f}K")
         shown = s['path'][:8] + s['path'][26::52][:4]

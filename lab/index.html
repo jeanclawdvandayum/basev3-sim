@@ -19,6 +19,16 @@
   engine re-run per point, noiseless, stacked revenue components + terminal
   supply overlay + break-even line + current-dial marker), value-flow split
   bar (where each yield dollar goes). dao_fixed_cost dial added.
+  Rev v2.1 (2026-09-03, scoopy) — churn-engine corrections: (1) standing
+  float capture — arb desks continuously buy discounted float and queue the
+  28d vest whenever arb-APR clears float_capture_apr; churn is now a
+  function of defender capital supply (float no longer piles up; peg pins
+  at T-bill parity); (2) LP depth is a function of VOLUME — fees accrue on
+  all swap legs (mint sells + float buys + exit re-buys) and depth relaxes
+  toward (fees + w*emissions)/hurdle; (3) deposit pulse — a fraction of
+  freed looper equity exits at redemption maturity (equity_exit_frac), new
+  DEPOSIT PULSE chart (daily equity flow vs redemption payouts vs float
+  buys). Churn 1.7 -> ~5 cycles/yr at BASE.
   Model: daily-timestep port of ~/clawd/base-launch-loop/base_loop_sim.py
   Identities baked in: float neutrality, T-bill parity peg, ~9x yield/equity conversion.
 -->
@@ -84,7 +94,7 @@
 <body>
 <header>
   <h1>alUSDb Base — Loop Mechanics Lab</h1>
-  <span class="chip">rev v2.0</span>
+  <span class="chip">rev v2.1</span>
   <span class="rev">daily-timestep port of base_loop_sim.py · debtor-side redemption fee · no borrower interest · 28d linear vest · DAO fee-economics layer</span>
 </header>
 <div class="wrap">
@@ -108,7 +118,7 @@
   <div class="cards">
     <div class="card"><div class="k">mature peg (yr 2)</div><div class="v mono" id="s-peg">–</div><div class="s">bid <span id="s-bid" class="mono">–</span></div></div>
     <div class="card"><div class="k">launch low (8wk)</div><div class="v mono" id="s-low">–</div><div class="s">daily min <span id="s-min" class="mono">–</span></div></div>
-    <div class="card"><div class="k">churn</div><div class="v mono" id="s-churn">–</div><div class="s">cycles/yr · <span id="s-churnvol" class="mono">–</span> vol</div></div>
+    <div class="card"><div class="k">churn</div><div class="v mono" id="s-churn">–</div><div class="s">cycles/yr · <span id="s-churnvol" class="mono">–</span> vol · float buys <span id="s-fbuys" class="mono">–</span></div></div>
     <div class="card"><div class="k">supply D (2yr)</div><div class="v mono" id="s-supply">–</div><div class="s">float <span id="s-float" class="mono">–</span></div></div>
     <div class="card"><div class="k">collateral C</div><div class="v mono" id="s-c">–</div><div class="s">from <span id="s-c0" class="mono">–</span> start</div></div>
     <div class="card"><div class="k">defender capital</div><div class="v mono" id="s-arb">–</div><div class="s">arb profit <span id="s-arbp" class="mono">–</span></div></div>
@@ -120,6 +130,7 @@
   <div class="chart-card"><h3>SYSTEM SIZE — collateral / debt / float ($M)</h3><div class="chart-box"><canvas id="c-size"></canvas></div></div>
   <div class="chart-card"><h3>LIQUIDITY — LP depth & defender capital ($M)</h3><div class="chart-box"><canvas id="c-liq"></canvas></div></div>
   <div class="chart-card"><h3>RATES — LP / arb / looper APR (%)</h3><div class="chart-box"><canvas id="c-apr"></canvas></div></div>
+  <div class="chart-card"><h3>DEPOSIT PULSE — daily equity flow vs redemption payouts vs float buys ($k/d)</h3><div class="chart-box"><canvas id="c-pulse"></canvas></div></div>
   <div class="chart-card"><h3>CHURN — cumulative minted vs redeemed ($M)</h3><div class="chart-box"><canvas id="c-churn"></canvas></div><div id="attr-line"></div></div>
   <div class="chart-card"><h3>DAO REVENUE — trailing 365d ($k/yr), stacked: MYT perf fee vs protocolFee on redemptions</h3><div class="chart-box"><canvas id="c-daorev"></canvas></div></div>
   <div class="chart-card"><h3>PERF-FEE LAFFER — full engine re-run per point (noiseless): DAO revenue split + terminal supply</h3><div class="chart-box laffer"><canvas id="c-laffer-perf"></canvas></div></div>
@@ -143,6 +154,8 @@ const DEFAULTS = {
   arb_hurdle:0.05, arb_deploy_daily:0.30, arb_inflow_apr:0.065, arb_inflow_daily:2e5,
   arb_exit_apr:0.05, arb_exit_daily:5e4,
   fee_tier:0.0003, emissions_per_day:3000, lp_alt_apr:0.06, lp_elasticity:0.08, lp_decay:0.30,
+  lp_track:0.015, emissions_depth_weight:0.35,
+  float_capture_apr:0.055, float_capture_rate:0.10, equity_exit_frac:0.05,
   flow_noise:0.30, risk_premium:0.0,            // python-parity default: T-bill parity bid 0.9962; scoopy's 0.9941 band = +275bp on this dial
   cold_start:false,
   shock_day:-1, shock_yield:0.005, recovery_day:-1,
@@ -181,8 +194,8 @@ function runSimRaw(cfg){
   let arb=c.initial_arb;                          // defender capital $
   let backlog=0, pendR=0, pendY=0;
   let ema=0, avgDsum=0;
-  let equity=0, arbProfit=0, lpFees=0, lpEmis=0, protFee=0, perfFee=0, debtorFees=0;
-  let mintVol=0, redeemVol=0, grossYield=0;
+    let equity=0, arbProfit=0, lpFees=0, lpEmis=0, protFee=0, perfFee=0, debtorFees=0;
+    let mintVol=0, redeemVol=0, grossYield=0, equityExit=0, floatBuys=0, poolVol=0;
   const revPerfD=[], revProtD=[];                    // daily DAO revenue streams ($)
   const attr={replacement:0, yield:0, equity:0};
   const vest=[];
@@ -193,7 +206,8 @@ function runSimRaw(cfg){
 
   // daily path (full resolution for charts + receipts)
   const pegs=[], Cs=[], Ds=[], Fs=[], depths=[], arbs=[],
-        lpAprs=[], arbAprs=[], looperAprs=[], cumMint=[], cumRedeem=[];
+        lpAprs=[], arbAprs=[], looperAprs=[], cumMint=[], cumRedeem=[],
+        depF=[], redF=[], buyfF=[];
   let cm=0, cr=0;
 
   for(let day=0; day<c.days; day++){
@@ -218,10 +232,12 @@ function runSimRaw(cfg){
     const inflow=Math.max(0,(c.deposit_base_daily+c.deposit_sensitivity*Math.max(0,gap)/365))*nz;
     const outflow=c.exit_sensitivity*Math.max(0,-gap)/365;
     const net=inflow-outflow;
+    let exitBuy=0;
     if(net<0){
       const out=Math.min(-net,C*0.02);
       const repay=Math.min(out/p,D);
       C-=repay*p; D-=repay; F=Math.max(0,F-repay);
+      exitBuy=repay;
     } else { C+=net; equity+=net; }
 
     // 3) MINT / LOOP with G1 mint gate + resting-bid clearing
@@ -274,6 +290,25 @@ function runSimRaw(cfg){
     // 4) ARB MIGRATION (G2): persistent discounts draw new defender capital
     const discount=1-p;
     const arbApr=discount*365/c.redemption_days;
+
+    // 4c) STANDING FLOAT CAPTURE — the churn engine. Persistent discount ->
+    //     arb desks buy float and queue the 28d vest; capital-bound, so
+    //     churn is a function of defender capital supply.
+    let buyF=0;
+    if(arbApr>=c.float_capture_apr && F>0 && arb>0){
+      const want=F*c.float_capture_rate;
+      const room=arb*c.arb_deploy_daily*0.5;
+      buyF=Math.min(want,room,F);
+      if(buyF>0){
+        arb-=buyF*p;                          // capital locked in vest
+        F-=buyF;
+        vest.push([day,buyF]);
+        p=Math.min(p_bid, p+buyF/effDepth*c.impact_k*p);
+        arbProfit+=buyF*(1-p);
+        floatBuys+=buyF;
+      }
+    }
+
     ema+=0.10*(discount-ema);
     if(ema>eq_disc*1.1 && arbApr>=c.arb_inflow_apr) arb+=c.arb_inflow_daily*Math.min(4, ema/eq_disc)*nz;
     else if(arbApr<c.arb_exit_apr && arb>2e5) arb-=Math.min(arb*0.01, c.arb_exit_daily);
@@ -286,6 +321,11 @@ function runSimRaw(cfg){
     if(pay>0){
       C-=pay*(1+c.protocol_fee);                    // fee extracted from DEBTORS
       D-=pay;
+      // redemption maturity frees looper equity: fraction withdrawn
+      // (profit-take) instead of silently re-looped — the shrink half
+      // of the deposit pulse
+      const eqX=Math.min(pay*c.equity_exit_frac, C*0.02);
+      C-=eqX; equityExit+=eqX;
       protFee+=pay*c.protocol_fee; debtorFees+=pay*c.protocol_fee;
       revProtD[day]+=pay*c.protocol_fee;
       redeemVol+=pay; cr+=pay; pendR+=pay; arb+=pay;
@@ -297,11 +337,16 @@ function runSimRaw(cfg){
     backlog=Math.max(0,wanted-pay);
     if(backlog>0) p=clamp(p-Math.min(0.002, backlog/Math.max(F,1)*0.01), c.peg_floor_hard, c.peg_max);
 
-    // 6) LP ECONOMICS: fees on churn volume + directed emissions
-    const fees=m*c.fee_tier;
-    const lpApr=(fees+c.emissions_per_day)*365/Math.max(depth,1);
-    lpFees+=fees; lpEmis+=c.emissions_per_day;
-    depth+=fees+c.emissions_per_day;
+    // 6) LP ECONOMICS: depth is a function of VOLUME — fees on ALL swap legs
+    //    (mint sells + float buys + exit re-buys); depth relaxes toward
+    //    (fees + w*emissions)/hurdle (BE: depth = LP income / r_lp).
+    const vol=m+buyF+exitBuy;
+    const fees=vol*c.fee_tier;
+    const incomeAnn=(fees+c.emissions_per_day)*365;
+    const targetDepth=((fees*365)+c.emissions_per_day*365*c.emissions_depth_weight)/c.lp_alt_apr;
+    const lpApr=incomeAnn/Math.max(depth,1);
+    lpFees+=fees; lpEmis+=c.emissions_per_day; poolVol+=vol;
+    depth+=(targetDepth-depth)*c.lp_track;
     depth+=depth*c.lp_elasticity*(lpApr-c.lp_alt_apr)/365;
     if(lpApr<c.lp_alt_apr) depth-=depth*c.lp_decay/365;
     depth=Math.max(depth,1e5);
@@ -320,6 +365,7 @@ function runSimRaw(cfg){
     depths.push(depth/1e6); arbs.push(arb/1e6);
     lpAprs.push(lpApr*100); arbAprs.push(arbApr*100); looperAprs.push(looperApr*100);
     cumMint.push(cm/1e6); cumRedeem.push(cr/1e6);
+    depF.push(net/1e3); redF.push(pay/1e3); buyfF.push(buyF/1e3);
 
     // solvency invariants (python hard-asserts; lab flags + degrades gracefully)
     pMinDaily=Math.min(pMinDaily,p); pMaxDaily=Math.max(pMaxDaily,p);
@@ -343,7 +389,8 @@ function runSimRaw(cfg){
   const daoPerfYr=trail(revPerfD,c.days-1), daoProtYr=trail(revProtD,c.days-1);
   return {
     finalC:C, finalD:D, finalF:F, finalArb:arb, finalDepth:depth,
-    ledgers:{equity, arbProfit, lpFees, lpEmis, protFee, perfFee, debtorFees, redeemVol, mintVol, grossYield},
+    ledgers:{equity, arbProfit, lpFees, lpEmis, protFee, perfFee, debtorFees, redeemVol, mintVol, grossYield,
+             equityExit, floatBuys, poolVol},
     attr, avgD, years, bid:1-(c.arb_hurdle+c.risk_premium)*c.redemption_days/365,
     daoPerfYr, daoProtYr,
     maturePeg: mature.length? mature.reduce((a,b)=>a+b,0)/mature.length : NaN,
@@ -354,7 +401,7 @@ function runSimRaw(cfg){
     churnRatio: redeemVol/Math.max(mintVol,1),
     invariants:inv,
     series:{pegs,Cs,Ds,Fs,depths,arbs,lpAprs,arbAprs,looperAprs,cumMint,cumRedeem,
-            daoDays,daoPerfPath,daoProtPath,revPerfD,revProtD}
+            daoDays,daoPerfPath,daoProtPath,revPerfD,revProtD,depF,redF,buyfF}
   };
 }
 
@@ -423,6 +470,13 @@ const CONTROL_GROUPS=[
    ["arb_inflow_daily","arb inflow $/d",0,2e6,"log",null,v=>"$"+fmtMoney(v)],
    ["arb_exit_apr","exit threshold APR",0,0.15,0.001,"lin",v=>(v*100).toFixed(2)+"%"],
    ["arb_exit_daily","arb exit $/d",0,1e6,"log",null,v=>"$"+fmtMoney(v)],
+ ]},
+ {name:"Churn Engine v2.1", open:true, keys:[
+   ["float_capture_apr","float capture APR",0,0.15,0.001,"lin",v=>(v*100).toFixed(2)+"%"],
+   ["float_capture_rate","float capture /d",0,0.5,0.005,"lin",v=>(v*100).toFixed(1)+"%"],
+   ["equity_exit_frac","equity exit at redeem",0,0.3,0.005,"lin",v=>(v*100).toFixed(1)+"%"],
+   ["lp_track","LP depth track /d",0,0.1,0.001,"lin",v=>v.toFixed(3)],
+   ["emissions_depth_weight","emissions depth weight",0,1,0.01,"lin",v=>(v*100).toFixed(0)+"%"],
  ]},
  {name:"LP / Aerodrome", open:false, keys:[
    ["fee_tier","blended fee tier",0,0.003,0.00001,"lin",v=>(v*1e4).toFixed(1)+"bp"],
@@ -564,6 +618,10 @@ function buildCharts(R){
   const aprData=[ds("LP APR","#39d353",xy(R.series.lpAprs)),
                  ds("arb APR","#f0b72f",xy(R.series.arbAprs)),
                  ds("looper APR","#58a6ff",xy(R.series.looperAprs))];
+  // PULSE
+  const pulseData=[ds("net equity flow","#58a6ff",xy(R.series.depF)),
+                   ds("redemption payouts","#ff7b72",xy(R.series.redF)),
+                   ds("arb float buys","#f0b72f",xy(R.series.buyfF))];
   // CHURN
   const churnData=[ds("cum minted","#bc8cff",xy(R.series.cumMint)),
                    ds("cum redeemed","#39d353",xy(R.series.cumRedeem))];
@@ -578,6 +636,7 @@ function buildCharts(R){
     ["c-size",sizeData,{scales:{x:{type:"linear",grid:GRID,ticks:Object.assign({maxTicksLimit:9,callback:v=>"d"+v},TICK)},y:Object.assign({},baseOpts().scales.y,moneyY)}}],
     ["c-liq",liqData,{scales:{x:{type:"linear",grid:GRID,ticks:Object.assign({maxTicksLimit:9,callback:v=>"d"+v},TICK)},y:Object.assign({},baseOpts().scales.y,moneyY)}}],
     ["c-apr",aprData,{scales:{x:{type:"linear",grid:GRID,ticks:Object.assign({maxTicksLimit:9,callback:v=>"d"+v},TICK)},y:Object.assign({},baseOpts().scales.y,aprY)}}],
+    ["c-pulse",pulseData,{scales:{x:{type:"linear",grid:GRID,ticks:Object.assign({maxTicksLimit:9,callback:v=>"d"+v},TICK)},y:Object.assign({},baseOpts().scales.y,{ticks:Object.assign({callback:v=>"$"+v+"k"},TICK)})}}],
     ["c-churn",churnData,{scales:{x:{type:"linear",grid:GRID,ticks:Object.assign({maxTicksLimit:9,callback:v=>"d"+v},TICK)},y:Object.assign({},baseOpts().scales.y,moneyY)}}],
   ];
   for(const [id,data,extra] of defs){
@@ -689,6 +748,7 @@ function render(){
   document.getElementById("s-min").textContent=fmtPeg(R.pMinDaily);
   document.getElementById("s-churn").textContent=R.churn.toFixed(1);
   document.getElementById("s-churnvol").textContent="$"+fmtMoney(R.ledgers.redeemVol);
+  document.getElementById("s-fbuys").textContent="$"+fmtMoney(R.ledgers.floatBuys);
   document.getElementById("s-supply").textContent="$"+fmtMoney(R.finalD);
   document.getElementById("s-float").textContent="$"+fmtMoney(R.finalF);
   document.getElementById("s-c").textContent="$"+fmtMoney(R.finalC);

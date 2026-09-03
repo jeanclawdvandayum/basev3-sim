@@ -8,7 +8,7 @@ Economics simulator for the **Alchemix V3 alUSD Base launch** — tests the "vir
 |---|---|
 | `base_loop_sim.py` | Daily-timestep simulation, stdlib only. 8 scenarios (base, cold-start, yield-shock, panic-run, strategy-loss, high-arb, thin-LP) + DAO revenue Laffer sweep tables + analytical cross-checks. Run: `python3 base_loop_sim.py` |
 | `VALIDATION_REPORT.md` | The verdict on the loop theory (~80% right: churn engine, not growth engine), scenario table, failure modes ranked, launch guidance, recalibration addendum, + v2.0 DAO fee-economics section |
-| `lab/index.html` | Interactive **Loop Mechanics Lab** — a single-file Chart.js dashboard port of the simulator. ~40 dials, 8 presets, 9 live charts: peg / system size / liquidity / rates / churn + **DAO revenue (perf fee vs protocolFee, trailing 365d)**, **perf-fee + protocol-fee Laffer sweeps** (full engine re-run per point, current-dial marker, DAO break-even line), **value-flow split** (where each yield dollar goes). Open it directly in a browser; no build step |
+| `lab/index.html` | Interactive **Loop Mechanics Lab** — a single-file Chart.js dashboard port of the simulator. ~40 dials, 8 presets, 10 live charts: peg / system size / liquidity / rates / deposit pulse / churn + **DAO revenue (perf fee vs protocolFee, trailing 365d)**, **perf-fee + protocol-fee Laffer sweeps** (full engine re-run per point, current-dial marker, DAO break-even line), **value-flow split** (where each yield dollar goes). Open it directly in a browser; no build step |
 
 ## Mechanics modeled (ground-truthed)
 
