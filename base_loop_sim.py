@@ -126,6 +126,17 @@ class Config:
     equity_exit_frac: float = 0.05    # frac of freed looper equity withdrawn
                                       # at redemption maturity (profit-take)
 
+    # --- liquidity sinks (what keeps churn BELOW the 13.03 structural cap) ---
+    lp_alusdb_share: float = 0.50     # alUSDb side of LP depth: every $ of
+                                      # depth growth parks this much alUSDb
+                                      # out of the float (pools are a SINK)
+    lending_sink_rate: float = 0.001  # frac of float/day absorbed into
+                                      # lending markets (Euler-style; grows
+                                      # with lindy — dial it)
+    emissions_cost_dao: bool = False  # veAERO-directed (not a cash cost);
+                                      # ~$2M veAERO votes two pools (stable +
+                                      # concentrated, 80/20 weight to stable)
+
     # --- scenario switches (all default off) ---
     cold_start: bool = False         # thin arb capital + thin absorption
     yield_shock_day: int = -1        # day myt_yield drops to shock_yield
@@ -180,7 +191,8 @@ def run(cfg: Config, collect_path=True) -> dict:
     led = dict(new_equity=0.0, arb_profit=0.0, lp_fees=0.0, lp_emissions=0.0,
                protocol_fee=0.0, perf_fee=0.0, debtor_fee_paid=0.0,
                redeem_vol=0.0, mint_vol=0.0, gross_yield=0.0,
-               equity_exit=0.0, float_buys=0.0, pool_volume=0.0)
+               equity_exit=0.0, float_buys=0.0, pool_volume=0.0,
+               lp_absorbed=0.0, lending_parked=0.0)
     path = []
     myt = c.myt_yield
     # daily DAO revenue streams (for trailing-annual series)
@@ -358,6 +370,9 @@ def run(cfg: Config, collect_path=True) -> dict:
         #    every swap leg (mint sells + standing float buys + exit re-buys),
         #    and depth relaxes toward the income-implied target
         #    depth* = (fees + w*emissions) / lp hurdle  — BE's depth = income/r.
+        #    The pools are also a LIQUIDITY SINK: depth growth parks alUSDb
+        #    inventory (lp_alusdb_share per $ of depth) out of the float —
+        #    alUSDb in the pool is alUSDb not in the transmuter.
         exit_buy = repay if net_dep < 0 else 0.0   # alUSD bought to exit
         vol = m + buy_f + exit_buy
         fees = vol * c.fee_tier
@@ -368,11 +383,30 @@ def run(cfg: Config, collect_path=True) -> dict:
         led['lp_fees'] += fees
         led['lp_emissions'] += c.emissions_per_day
         led['pool_volume'] += vol
+        depth_prev = depth
         depth += (target_depth - depth) * c.lp_track
         depth += depth * c.lp_elasticity * (lp_apr - c.lp_alt_apr) / 365
         if lp_apr < c.lp_alt_apr:
             depth -= depth * c.lp_decay / 365
         depth = max(depth, 100_000)
+        # sink/release: alUSDb side of pool inventory moves with depth
+        d_depth = depth - depth_prev
+        if d_depth > 0:
+            absorb = min(d_depth * c.lp_alusdb_share, F)
+            F -= absorb
+            led['lp_absorbed'] += absorb
+        elif d_depth < 0:
+            release = min(-d_depth * c.lp_alusdb_share,
+                          max(0.0, led['lp_absorbed']))  # can't release more
+            F += release                 # than was ever parked
+            led['lp_absorbed'] -= release
+
+        # 6b) LENDING SINK: alUSDb supplied to lending markets (Euler-style)
+        #     — the lindy sink. Slow drain, sticky.
+        if c.lending_sink_rate > 0 and F > 0:
+            parked = F * c.lending_sink_rate
+            F -= parked
+            led['lending_parked'] += parked
 
         # 7) PANIC RUN (stress): float dumps; half of it also queues redemption
         if 0 <= c.run_day == day:
@@ -466,10 +500,12 @@ def sweep(cfg: Config, attr: str, values) -> list:
 def print_dao_line(name, s, cfg):
     L = s['ledgers']
     total = s['dao_perf_yr'] + s['dao_prot_yr']
-    net = total - L['lp_emissions'] - cfg.dao_fixed_cost
+    emis_cost = L['lp_emissions'] if cfg.emissions_cost_dao else 0.0
+    net = total - emis_cost - cfg.dao_fixed_cost
+    tag = "veAERO" if not cfg.emissions_cost_dao else "cash"
     print(f"  DAO yr-2 revenue ${total/1e3:7.1f}k/yr = perf ${s['dao_perf_yr']/1e3:6.1f}k"
           f" + redemption ${s['dao_prot_yr']/1e3:5.1f}k"
-          f" | net (− emis ${L['lp_emissions']/1e3:5.0f}k − fixed ${cfg.dao_fixed_cost/1e3:4.0f}k)"
+          f" | net (− emis[{tag}] ${emis_cost/1e3:5.0f}k − fixed ${cfg.dao_fixed_cost/1e3:4.0f}k)"
           f" = ${net/1e3:+7.1f}k")
 
 

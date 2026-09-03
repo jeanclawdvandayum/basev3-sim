@@ -161,3 +161,20 @@ Three structural fixes after scoopy flagged the sim underestimating 28d-redempti
 **Validation:** JS ≡ python bit-exact at noise=0 on all 11 fields (C, D, F, arb, depth, churn, floatBuys, equityExit, poolVol, daoPerfYr, daoProtYr — full-precision receipts in the session log). Both Laffer sweeps recompute under the new dynamics automatically.
 
 **Calibration honesty:** 5.0 cycles/yr still sits below the spec's ~13 theoretical max because arb capital supply (inflow $200k/d, deploy caps) is the binding constraint — that is the model's claim, not a bug: churn = min(capital throughput, float supply) / D. If scoopy's read is that defender capital on Base will be much larger, the dial is `arb inflow $/d` — at $1M/d the model should approach ~13 cycles/yr. (Not yet swept in this pass.)
+
+---
+
+## 8. v2.2 — liquidity sinks + veAERO economics (2026-09-03, scoopy)
+
+Ground truth: churn will NOT hit the 13.03 structural cap because alUSDb has competing homes.
+
+**Mechanisms added**
+- **LP pools as a liquidity SINK**: depth growth parks alUSDb inventory (`lp_alusdb_share`, default 50¢ per $ of depth) out of the float — alUSDb in the pool is alUSDb not in the transmuter. Released back to float on depth decay (capped at what was ever parked). This closes the flywheel scoopy described: looping + arb volume → fees → depth growth → alUSDb parked → less float for the transmuter → churn settles below cap. At BASE: $4.1M parked over 2y.
+- **Lending-market sink**: slow sticky float drain (`lending_sink_rate`, 0.1%/day default — dial it for lindy scenarios). $7.7M parked over 2y at default.
+- **veAERO emissions are not a cash cost**: ~$2M veAERO votes two pools (basic stable + concentrated, 80/20 weight to stable) — directed income to LPs at zero DAO spend. `emissions_cost_dao` flag (default false): DAO net and the Laffer break-even line no longer subtract emissions when veAERO-directed.
+
+**Result**: float $29.5M → $17.7M with both sinks. Churn unchanged at ~4.99/yr *at BASE calibration* — because standing capture is capital-bound there, the sinks eat the standing float stock rather than the flow. At high defender-capital calibrations (near max transmuter usage), the sinks become the binding factor pulling churn off 13.03 — testable by raising `arb inflow $/d` and watching where churn tops out.
+
+**Economics correction (material)**: with veAERO-directed emissions, DAO yr-2 net flips from −$1.32M to **+$881k** (perf $803k + redemption $387k − fixed $300k). The break-even line on both Laffer charts drops to fixed-cost-only. The launch is net-cash-positive at BASE scale if the fixed-cost envelope stays ≤ ~$1.1M/yr.
+
+**Validation**: JS ≡ python bit-exact (10 fields incl. lp_absorbed, lending_parked, both DAO streams — full precision).

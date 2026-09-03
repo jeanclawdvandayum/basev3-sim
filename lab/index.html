@@ -29,6 +29,14 @@
   freed looper equity exits at redemption maturity (equity_exit_frac), new
   DEPOSIT PULSE chart (daily equity flow vs redemption payouts vs float
   buys). Churn 1.7 -> ~5 cycles/yr at BASE.
+  Rev v2.2 (2026-09-03, scoopy) — liquidity sinks pull churn off the 13.03
+  structural cap: LP pools park alUSDb inventory as depth grows (every $ of
+  depth parks lp_alusdb_share of alUSDb out of the float — alUSDb in the
+  pool is alUSDb not in the transmuter; released back on depth decay);
+  lending-market sink (Euler-style, lindy); veAERO-directed emissions are
+  NOT a DAO cash cost (~$2M veAERO votes two pools: basic stable +
+  concentrated, 80/20 weight to stable) — DAO net + Laffer break-even now
+  respect the emissions_cost_dao flag.
   Model: daily-timestep port of ~/clawd/base-launch-loop/base_loop_sim.py
   Identities baked in: float neutrality, T-bill parity peg, ~9x yield/equity conversion.
 -->
@@ -94,7 +102,7 @@
 <body>
 <header>
   <h1>alUSDb Base — Loop Mechanics Lab</h1>
-  <span class="chip">rev v2.1</span>
+  <span class="chip">rev v2.2</span>
   <span class="rev">daily-timestep port of base_loop_sim.py · debtor-side redemption fee · no borrower interest · 28d linear vest · DAO fee-economics layer</span>
 </header>
 <div class="wrap">
@@ -156,6 +164,7 @@ const DEFAULTS = {
   fee_tier:0.0003, emissions_per_day:3000, lp_alt_apr:0.06, lp_elasticity:0.08, lp_decay:0.30,
   lp_track:0.015, emissions_depth_weight:0.35,
   float_capture_apr:0.055, float_capture_rate:0.10, equity_exit_frac:0.05,
+  lp_alusdb_share:0.50, lending_sink_rate:0.001, emissions_cost_dao:false,
   flow_noise:0.30, risk_premium:0.0,            // python-parity default: T-bill parity bid 0.9962; scoopy's 0.9941 band = +275bp on this dial
   cold_start:false,
   shock_day:-1, shock_yield:0.005, recovery_day:-1,
@@ -194,8 +203,8 @@ function runSimRaw(cfg){
   let arb=c.initial_arb;                          // defender capital $
   let backlog=0, pendR=0, pendY=0;
   let ema=0, avgDsum=0;
-    let equity=0, arbProfit=0, lpFees=0, lpEmis=0, protFee=0, perfFee=0, debtorFees=0;
-    let mintVol=0, redeemVol=0, grossYield=0, equityExit=0, floatBuys=0, poolVol=0;
+  let equity=0, arbProfit=0, lpFees=0, lpEmis=0, protFee=0, perfFee=0, debtorFees=0;
+  let mintVol=0, redeemVol=0, grossYield=0, equityExit=0, floatBuys=0, poolVol=0, lpAbsorbed=0, lendingParked=0;
   const revPerfD=[], revProtD=[];                    // daily DAO revenue streams ($)
   const attr={replacement:0, yield:0, equity:0};
   const vest=[];
@@ -340,16 +349,34 @@ function runSimRaw(cfg){
     // 6) LP ECONOMICS: depth is a function of VOLUME — fees on ALL swap legs
     //    (mint sells + float buys + exit re-buys); depth relaxes toward
     //    (fees + w*emissions)/hurdle (BE: depth = LP income / r_lp).
+    //    The pools are also a LIQUIDITY SINK: depth growth parks alUSDb
+    //    inventory (lp_alusdb_share per $ of depth) out of the float —
+    //    alUSDb in the pool is alUSDb not in the transmuter.
     const vol=m+buyF+exitBuy;
     const fees=vol*c.fee_tier;
     const incomeAnn=(fees+c.emissions_per_day)*365;
     const targetDepth=((fees*365)+c.emissions_per_day*365*c.emissions_depth_weight)/c.lp_alt_apr;
     const lpApr=incomeAnn/Math.max(depth,1);
     lpFees+=fees; lpEmis+=c.emissions_per_day; poolVol+=vol;
+    const depthPrev=depth;
     depth+=(targetDepth-depth)*c.lp_track;
     depth+=depth*c.lp_elasticity*(lpApr-c.lp_alt_apr)/365;
     if(lpApr<c.lp_alt_apr) depth-=depth*c.lp_decay/365;
     depth=Math.max(depth,1e5);
+    // sink/release: alUSDb side of pool inventory moves with depth
+    const dDepth=depth-depthPrev;
+    if(dDepth>0){
+      const absorb=Math.min(dDepth*c.lp_alusdb_share,F);
+      F-=absorb; lpAbsorbed+=absorb;
+    } else if(dDepth<0){
+      const release=Math.min(-dDepth*c.lp_alusdb_share,Math.max(0,lpAbsorbed));
+      F+=release; lpAbsorbed-=release;
+    }
+    // 6b) LENDING SINK: alUSDb supplied to lending markets (Euler-style)
+    if(c.lending_sink_rate>0 && F>0){
+      const parked=F*c.lending_sink_rate;
+      F-=parked; lendingParked+=parked;
+    }
 
     // 7) events
     if(c.run_day===day){
@@ -390,7 +417,7 @@ function runSimRaw(cfg){
   return {
     finalC:C, finalD:D, finalF:F, finalArb:arb, finalDepth:depth,
     ledgers:{equity, arbProfit, lpFees, lpEmis, protFee, perfFee, debtorFees, redeemVol, mintVol, grossYield,
-             equityExit, floatBuys, poolVol},
+             equityExit, floatBuys, poolVol, lpAbsorbed, lendingParked},
     attr, avgD, years, bid:1-(c.arb_hurdle+c.risk_premium)*c.redemption_days/365,
     daoPerfYr, daoProtYr,
     maturePeg: mature.length? mature.reduce((a,b)=>a+b,0)/mature.length : NaN,
@@ -471,12 +498,15 @@ const CONTROL_GROUPS=[
    ["arb_exit_apr","exit threshold APR",0,0.15,0.001,"lin",v=>(v*100).toFixed(2)+"%"],
    ["arb_exit_daily","arb exit $/d",0,1e6,"log",null,v=>"$"+fmtMoney(v)],
  ]},
- {name:"Churn Engine v2.1", open:true, keys:[
+ {name:"Churn Engine & Sinks", open:true, keys:[
    ["float_capture_apr","float capture APR",0,0.15,0.001,"lin",v=>(v*100).toFixed(2)+"%"],
    ["float_capture_rate","float capture /d",0,0.5,0.005,"lin",v=>(v*100).toFixed(1)+"%"],
    ["equity_exit_frac","equity exit at redeem",0,0.3,0.005,"lin",v=>(v*100).toFixed(1)+"%"],
    ["lp_track","LP depth track /d",0,0.1,0.001,"lin",v=>v.toFixed(3)],
    ["emissions_depth_weight","emissions depth weight",0,1,0.01,"lin",v=>(v*100).toFixed(0)+"%"],
+   ["lp_alusdb_share","pool alUSDb side",0,1,0.01,"lin",v=>(v*100).toFixed(0)+"%"],
+   ["lending_sink_rate","lending sink /d",0,0.01,0.0001,"lin",v=>(v*100).toFixed(3)+"%"],
+   ["emissions_cost_dao","emissions cost DAO",0,1,1,"int",v=>v?"cash cost":"veAERO (free)"],
  ]},
  {name:"LP / Aerodrome", open:false, keys:[
    ["fee_tier","blended fee tier",0,0.003,0.00001,"lin",v=>(v*1e4).toFixed(1)+"bp"],
@@ -676,7 +706,7 @@ function buildFeeCharts(R){
 
   // ---- Laffer pair ----
   const sp=sweepFee("perf_fee",PERF_SWEEP), st=sweepFee("protocol_fee",PROT_SWEEP);
-  const breakeven=(P.emissions_per_day*365+P.dao_fixed_cost)/1e3;   // $k/yr
+  const breakeven=((P.emissions_cost_dao?P.emissions_per_day*365:0)+P.dao_fixed_cost)/1e3;   // $k/yr
   function laffer(id,rows,fmtX,curFee){
     const labels=rows.map(r=>fmtX(r.fee));
     const nearest=rows.reduce((b,r)=>Math.abs(r.fee-curFee)<Math.abs(b.fee-curFee)?r:b,rows[0]);
@@ -756,8 +786,9 @@ function render(){
   document.getElementById("s-arbp").textContent="$"+fmtMoney(R.ledgers.arbProfit);
 
   // DAO revenue cards (yr-2 trailing-365 reads; avg over full run as sub-line)
+  const emisCostYr=P.emissions_cost_dao?P.emissions_per_day*365:0;   // veAERO = not cash
   const emisYr=P.emissions_per_day*365;
-  const daoNetYr=R.daoPerfYr+R.daoProtYr-emisYr-P.dao_fixed_cost;
+  const daoNetYr=R.daoPerfYr+R.daoProtYr-emisCostYr-P.dao_fixed_cost;
   document.getElementById("s-daoperf").textContent="$"+fmtMoney(R.daoPerfYr);
   document.getElementById("s-daoperfx").textContent="$"+fmtMoney(R.ledgers.perfFee/R.years);
   document.getElementById("s-daoprot").textContent="$"+fmtMoney(R.daoProtYr);
@@ -765,7 +796,7 @@ function render(){
   const netEl=document.getElementById("s-daonet");
   netEl.textContent=(daoNetYr>=0?"$":"−$")+fmtMoney(Math.abs(daoNetYr));
   netEl.className="v mono "+(daoNetYr>=0?"good":"bad");
-  document.getElementById("s-daonetx").textContent="$"+fmtMoney(emisYr);
+  document.getElementById("s-daonetx").textContent=(P.emissions_cost_dao?"$":"veAERO $")+fmtMoney(emisYr);
   document.getElementById("s-daofix").textContent="$"+fmtMoney(P.dao_fixed_cost);
   document.getElementById("attr-line").textContent=
     `mints $${fmtMoney(R.ledgers.mintVol)} = replacement $${fmtMoney(R.attr.replacement)} + yield-conv $${fmtMoney(R.attr.yield)} + equity-conv $${fmtMoney(R.attr.equity)} · churn ratio (redeem/mint) ${R.churnRatio.toFixed(2)}`;
