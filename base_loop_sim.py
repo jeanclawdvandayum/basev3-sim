@@ -61,6 +61,9 @@ class Config:
     myt_yield: float = 0.05          # curated Base MYT target (Morpho menu
                                      # 4.3-5.9%: scoopy's "projected 5%")
     dealloc_cap_daily: float = 0.10  # max 10%/day of collateral pulled
+    dao_fixed_cost: float = 300_000  # DAO overhead charged against Base
+                                     # revenue (audits, dev, ops) — BE-style
+                                     # fixed cost, for net-revenue reads
 
     # --- starting state ---
     initial_equity: float = 2_000_000    # day-0 USDC deposited by loopers
@@ -163,9 +166,12 @@ def run(cfg: Config, collect_path=True) -> dict:
 
     led = dict(new_equity=0.0, arb_profit=0.0, lp_fees=0.0, lp_emissions=0.0,
                protocol_fee=0.0, perf_fee=0.0, debtor_fee_paid=0.0,
-               redeem_vol=0.0, mint_vol=0.0)
+               redeem_vol=0.0, mint_vol=0.0, gross_yield=0.0)
     path = []
     myt = c.myt_yield
+    # daily DAO revenue streams (for trailing-annual series)
+    rev_perf_daily = []
+    rev_prot_daily = []
 
     for day in range(c.days):
         avg_D_sum += D
@@ -183,6 +189,9 @@ def run(cfg: Config, collect_path=True) -> dict:
         y_net = y * (1 - c.perf_fee)
         C += y_net
         led['perf_fee'] += y * c.perf_fee
+        led['gross_yield'] += y
+        rev_perf_daily.append(y * c.perf_fee)
+        rev_prot_daily.append(0.0)
         pending_yield += y_net * 0.9 / (1 - c.ltv * c.initial_peg)
 
         # 2) NEW EXTERNAL EQUITY: loopers chase levered carry
@@ -296,6 +305,7 @@ def run(cfg: Config, collect_path=True) -> dict:
             D -= pay                              # burned liability
             led['protocol_fee'] += pay * c.protocol_fee
             led['debtor_fee_paid'] += pay * c.protocol_fee
+            rev_prot_daily[-1] += pay * c.protocol_fee
             led['redeem_vol'] += pay
             pending_replacement += pay            # re-mint capacity reopens
             arb += pay                            # recycled to arb desks
@@ -351,11 +361,25 @@ def run(cfg: Config, collect_path=True) -> dict:
 
     avg_D = avg_D_sum / max(c.days, 1)
     years = c.days / 365
+
+    # trailing-365d DAO revenue series (aligned to day index; first year uses
+    # expanding window) + the yr-2 annual read
+    def trail(arr, d, n=365):
+        return sum(arr[max(0, d - n + 1):d + 1])
+    dao_rev_path = [dict(day=d,
+                         perf=trail(rev_perf_daily, d),
+                         prot=trail(rev_prot_daily, d))
+                    for d in range(0, c.days, 7)]
+    dao_perf_yr = trail(rev_perf_daily, c.days - 1)
+    dao_prot_yr = trail(rev_prot_daily, c.days - 1)
+
     return dict(
         final_C=C, final_D=D, final_F=F, final_arb=arb, final_depth=depth,
         ledgers=led, redeems=led['redeem_vol'], total_mint=led['mint_vol'],
         attr=attr, avg_D=avg_D, p_min_daily=p_min_daily,
         p_max_daily=p_max_daily,
+        dao_perf_yr=dao_perf_yr, dao_prot_yr=dao_prot_yr,
+        dao_rev_path=dao_rev_path,
         churn_cycles=led['redeem_vol'] / max(avg_D * years, 1),
         churn_ratio=led['redeem_vol'] / max(led['mint_vol'], 1),
         path=path)
@@ -365,6 +389,40 @@ def run(cfg: Config, collect_path=True) -> dict:
 
 def pct(x):
     return f"{x*100:.1f}%"
+
+# --------------------------------------------------- fee laffer sweeps ----
+# Re-runs the FULL engine per fee point (same seed -> comparable curves).
+# Yields the two DAO revenue streams separately, exactly as the lab charts:
+#   perf revenue  = MYT performance fee on yield
+#   redem revenue = protocolFee extracted from debtor collateral at payout
+
+PERF_SWEEP = [0.0, 0.025, 0.05, 0.075, 0.10, 0.125, 0.15, 0.175, 0.20,
+              0.225, 0.25, 0.275, 0.30, 0.325, 0.35, 0.375, 0.40]
+PROT_SWEEP = [0.0, 0.001, 0.002, 0.003, 0.004, 0.005, 0.006, 0.0075,
+              0.009, 0.010, 0.0125, 0.015, 0.0175, 0.020]
+
+
+def sweep(cfg: Config, attr: str, values) -> list:
+    out = []
+    for v in values:
+        s = run(dc_replace(cfg, **{attr: v}, flow_noise=0.0))  # noiseless:
+        out.append(dict(fee=v,                    # smooth, JS-verifiable
+                        perf_k=s['dao_perf_yr'] / 1e3,
+                        prot_k=s['dao_prot_yr'] / 1e3,
+                        D_M=s['final_D'] / 1e6, C_M=s['final_C'] / 1e6,
+                        churn=s['churn_cycles'],
+                        peg=s['path'][-1]['peg'] if s['path'] else float('nan')))
+    return out
+
+
+def print_dao_line(name, s, cfg):
+    L = s['ledgers']
+    total = s['dao_perf_yr'] + s['dao_prot_yr']
+    net = total - L['lp_emissions'] - cfg.dao_fixed_cost
+    print(f"  DAO yr-2 revenue ${total/1e3:7.1f}k/yr = perf ${s['dao_perf_yr']/1e3:6.1f}k"
+          f" + redemption ${s['dao_prot_yr']/1e3:5.1f}k"
+          f" | net (− emis ${L['lp_emissions']/1e3:5.0f}k − fixed ${cfg.dao_fixed_cost/1e3:4.0f}k)"
+          f" = ${net/1e3:+7.1f}k")
 
 
 def main():
@@ -388,7 +446,12 @@ def main():
     print("=" * 78)
 
     for name, cfg in scenarios.items():
-        s = run(cfg)
+        try:
+            s = run(cfg)
+        except AssertionError as e:
+            print(f"\n--- {name} " + "-" * (74 - len(name)))
+            print(f"  ⚠ {e} — system broke (hard assert; the modeled tail).")
+            continue
         L = s['ledgers']
         A = s['attr']
         pegs = [r['peg'] for r in s['path'] if r['day'] > 56]  # post-launch
@@ -398,6 +461,7 @@ def main():
         print(f"  2yr: C=${s['final_C']/1e6:6.1f}M  D=${s['final_D']/1e6:5.1f}M  "
               f"float=${s['final_F']/1e6:5.1f}M  depth=${s['final_depth']/1e6:4.1f}M  "
               f"arb=${s['final_arb']/1e6:4.1f}M")
+        print_dao_line(name, s, cfg)
         print(f"  peg launch(8wk): lo {min(launch):.3f} | daily extremes: "
               f"lo {s['p_min_daily']:.4f} hi {s['p_max_daily']:.4f} | "
               f"mature(yr2): mean {sum(mature)/len(mature):.4f}")
@@ -406,13 +470,30 @@ def main():
         print(f"  redeemed ${s['redeems']/1e6:5.1f}M | churn {s['churn_cycles']:.1f} "
               f"cycles/yr | new equity ${L['new_equity']/1e6:5.1f}M")
         print(f"  LP: fees ${L['lp_fees']/1e3:5.0f}K + emissions "
-              f"${L['lp_emissions']/1e3:5.0f}K | arb profit ${L['arb_profit']/1e3:6.0f}K"
-              f" | protocol ${(L['protocol_fee']+L['perf_fee'])/1e3:6.0f}K")
+              f"${L['lp_emissions']/1e3:5.0f}K | arb profit ${L['arb_profit']/1e3:6.0f}K")
         shown = s['path'][:8] + s['path'][26::52][:4]
         for r in shown:
             print(f"    d{r['day']:3d} peg {r['peg']:.4f} C {r['C']:5.1f}M "
                   f"D {r['D']:5.1f}M F {r['F']:5.1f}M depth {r['depth']:4.1f}M "
                   f"lpAPR {r['lp_apr']:5.1f}% arbAPR {r['arb_apr']:5.1f}%")
+
+    # ---------------- DAO revenue Laffer sweeps ----------------
+    for title, attr, values, fmtv in [
+            ("PERF-FEE LAFFER (redemption fee fixed)", "perf_fee",
+             PERF_SWEEP, lambda v: f"{v*100:5.1f}%"),
+            ("PROTOCOL-FEE LAFFER (perf fee fixed)", "protocol_fee",
+             PROT_SWEEP, lambda v: f"{v*1e4:5.1f}bp")]:
+        print("\n" + "=" * 78)
+        print(title.center(78))
+        print(f"(full engine re-run per point, noiseless; other dials at BASE)")
+        print("=" * 78)
+        rows = sweep(base, attr, values)
+        print(f"  {'fee':>7s} {'perf $k/yr':>11s} {'redem $k/yr':>12s} "
+              f"{'total $k/yr':>12s} {'D $M':>7s} {'C $M':>7s} {'churn/yr':>9s} {'peg':>7s}")
+        for r in rows:
+            print(f"  {fmtv(r['fee']):>7s} {r['perf_k']:11.1f} {r['prot_k']:12.1f} "
+                  f"{r['perf_k']+r['prot_k']:12.1f} {r['D_M']:7.1f} {r['C_M']:7.1f} "
+                  f"{r['churn']:9.1f} {r['peg']:7.4f}")
 
     # ---------------- analytical cross-checks ----------------
     print("\n" + "=" * 78)

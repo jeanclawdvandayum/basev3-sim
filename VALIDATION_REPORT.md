@@ -114,3 +114,32 @@ Initial flow calibration was ~2x punitive on impact and too slow on arb/loop cad
 **The binding constraints are exactly the ones scoopy named:** churn throughput = min(bid capacity ∝ depth × arb capital, mint flow ∝ loop tap × headroom). Nothing else limits it — the arb layer never binds once capital is at parity. Depth sweep: deeper liquidity lifts the mature peg toward pure T-bill parity (0.9949 → 0.9951 at $10-20M depth) — "depth buys the last 50bp" confirmed.
 
 **Structural conclusions are calibration-independent** (they're identities, not parameters): float neutrality (0.99r re-mint capacity per r redeemed), T-bill parity pricing of the peg, ~9x yield/equity conversion through the loop, and MYT principal as the only true tail risk.
+
+---
+
+## 6. v2.0 — DAO fee-economics layer (2026-09-03)
+
+Added after reviewing blockenthusiast's `MYT-OPS-Dashboard` notebooks (`fee_growth_balance.ipynb`, `fee_laffer_scenarios.ipynb`). The good parts, ported onto THIS engine rather than imported as a second model:
+
+**What was added**
+- **DAO revenue split into its two independent streams**, charted separately everywhere:
+  - *MYT perf fee*: `C × myt_yield × perf_fee` accrual on yield
+  - *protocolFee on redemptions*: debtor-collateral extraction at every vesting payout (`pay × protocol_fee`)
+  - Trailing-365d path chart (stacked areas), yr-2 stat cards, net-after-(emissions+fixed) card with good/bad coloring, `dao_fixed_cost` dial (default $300k/yr, BE's calibration)
+- **Perf-fee Laffer** (0→40%, 17 pts) and **protocol-fee Laffer** (0→200bp, 14 pts): the FULL engine re-runs per point (noise off, same seed) — bars stack the two revenue streams, blue line overlays terminal supply D, red dashed line = DAO break-even (emissions+fixed), green diamond = current dial position
+- **Value-flow split bar**: avg $k/yr to depositors (net yield) / DAO perf / DAO redemption / defenders (discount capture) / LPs (fees+emissions)
+- python: `sweep()` + both sweep tables in `main()`; noiseless sweeps are the JS cross-check reference
+
+**Validation receipts (JS ≡ python, noiseless, bit-exact)**
+- Full-run: C=534173482.216690 D=473696994.419400 F=346795518.848600 — all 6 decimals match
+- dao_perf_yr=2766073.5187, dao_prot_yr=470917.0827 — match
+- Spot sweep points (perf_k/prot_k/DM × 10 assertions across both sweeps): all PASS at 0.01 tolerance
+- Path identity: weekly trailing-365 series matches python sampling (d≡0 mod 7); yr read = trail(d=729)
+- Bug found + fixed during validation: python trail() originally sliced a 366-day window (`[d-365:d+1]`); corrected to `[d-364:d+1]`. The +0.16% discrepancy this produced was the ONLY JS/python delta — engines were already bit-identical
+- Visual: flash-audit of screenshots (cards, stacked areas, both Laffer charts incl. marker/break-even/overlay, 5-segment split bar) — all present, no clipping/overlap. Marker placement asserted programmatically (index 1="10bp" at default dial) after flash misread narrow bars
+- Pre-existing (NOT a v2.0 regression, verified against git baseline): STRATEGY-LOSS asserts INSOLVENT at day 150 — correct modeled behavior (15% principal loss breaks 1:1 backing mid-run); `main()` now catches and reports instead of dying
+
+**Substantive findings from the sweeps (BASE calibration)**
+- **No Laffer peak in 0-40% perf / 0-200bp protocol within this engine's demand model.** Reason: looping capital is ~10x-levered, so even a 40% perf fee leaves looper APR ≈ 10×5%×0.6 = 30% ≫ 15% hurdle — equity keeps flowing in. BE's interior optimum (perf 17.5%) comes from his 1x-capital seats vs a 4% outside option; ours mutes it. To surface a peak in the lab: raise `looper hurdle APR` to ~30% or cut MYT yield
+- Redemption-fee revenue is nearly free money at Base scale in this model: 10bp → $471k/yr (yr-2); even 100bp only costs ~$63M of terminal supply (473.7→410.7M, −13%) while paying $4.7M/yr — churn actually RISES with the fee (2.0 vs 1.7 cycles/yr at 200bp). CAVEAT: this is exactly the dial BE's model prices differently (borrower seat hits the outside option at 20-35bp on his calibration) — the truth depends on how fee-sensitive Base borrowers are, an elasticity to measure rather than assume
+- Perf-fee revenue dwarfs redemption revenue at Base calibration ($2.77M vs $0.47M at 15%/10bp) — and the value-flow bar shows LPs' income is ~78% emissions at BASE, the no-LP-share depth budget BE warns about

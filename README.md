@@ -6,9 +6,9 @@ Economics simulator for the **Alchemix V3 alUSD Base launch** — tests the "vir
 
 | File | What it is |
 |---|---|
-| `base_loop_sim.py` | Daily-timestep simulation, stdlib only. 8 scenarios (base, cold-start, yield-shock, panic-run, strategy-loss, high-arb, thin-LP) + analytical cross-checks. Run: `python3 base_loop_sim.py` |
-| `VALIDATION_REPORT.md` | The verdict on the loop theory (~80% right: churn engine, not growth engine), scenario table, failure modes ranked, launch guidance, + recalibration addendum |
-| `lab/index.html` | Interactive **Loop Mechanics Lab** — a single-file Chart.js dashboard port of the simulator. ~40 dials, 8 presets, live charts (peg / system size / liquidity / rates / churn). Open it directly in a browser; no build step |
+| `base_loop_sim.py` | Daily-timestep simulation, stdlib only. 8 scenarios (base, cold-start, yield-shock, panic-run, strategy-loss, high-arb, thin-LP) + DAO revenue Laffer sweep tables + analytical cross-checks. Run: `python3 base_loop_sim.py` |
+| `VALIDATION_REPORT.md` | The verdict on the loop theory (~80% right: churn engine, not growth engine), scenario table, failure modes ranked, launch guidance, recalibration addendum, + v2.0 DAO fee-economics section |
+| `lab/index.html` | Interactive **Loop Mechanics Lab** — a single-file Chart.js dashboard port of the simulator. ~40 dials, 8 presets, 9 live charts: peg / system size / liquidity / rates / churn + **DAO revenue (perf fee vs protocolFee, trailing 365d)**, **perf-fee + protocol-fee Laffer sweeps** (full engine re-run per point, current-dial marker, DAO break-even line), **value-flow split** (where each yield dollar goes). Open it directly in a browser; no build step |
 
 ## Mechanics modeled (ground-truthed)
 
@@ -28,7 +28,15 @@ Three governors make the loop oscillate instead of running away: the **mint gate
 
 ## Verification
 
-The Chart.js lab is a **bit-identical port** of the python simulator with `flow_noise=0` (all finals and daily checkpoints match exactly); with noise on it reproduces the python receipts within noise realization (mature peg 0.9939 vs 0.9940, launch dip 0.9805 vs 0.9803, panic wick 0.9000, churn 1.67 vs 1.7).
+The Chart.js lab is a **bit-identical port** of the python simulator with `flow_noise=0` (all finals and daily checkpoints match exactly); with noise on it reproduces the python receipts within noise realization (mature peg 0.9939 vs 0.9940, launch dip 0.9805 vs 0.9803, panic wick 0.9000, churn 1.67 vs 1.7). The v2.0 fee-economics layer holds the same bar: DAO revenue streams, trailing-365 path, and both Laffer sweeps all match python to the last float digit (see VALIDATION_REPORT §6).
+
+## DAO revenue accounting (v2.0)
+
+Two independent streams, reported separately everywhere:
+- **MYT perf fee** — accrues on yield: `C × myt_yield × perf_fee` (dominant at Base calibration: $2.77M/yr at 15% on a $534M 2-yr collateral base)
+- **protocolFee on redemptions** — extracted from debtor collateral at vesting payout (`pay × protocol_fee`); $471k/yr at 10bp with ~1.7 churn cycles
+
+Sweeps re-run the full engine per fee point (noiseless). Within this engine's demand model there is **no interior Laffer peak** up to 40% perf / 200bp protocol — looping capital is ~10x levered so even aggressive fees leave looper APR far above the 15% hurdle. Raise the `looper hurdle` dial to surface the peak.
 
 ## Model caveats
 

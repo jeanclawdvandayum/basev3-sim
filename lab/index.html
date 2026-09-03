@@ -12,6 +12,13 @@
   (was: uninitialized depthNow/depthLive -> NaN), removed dead draft engine,
   single noise draw per day (python-parity), daily path, solvency invariant
   flags, cumulative churn chart, attribution line, 8 presets.
+  Rev v2.0 (2026-09-03) — DAO fee-economics layer (BE's MYT-OPS notebooks,
+  adapted to this engine): split DAO revenue into MYT perf-fee vs debtor-side
+  protocolFee-on-redemption streams (trailing-365d path chart, yr-2 cards,
+  net after emissions+fixed), perf-fee + protocol-fee Laffer sweeps (full
+  engine re-run per point, noiseless, stacked revenue components + terminal
+  supply overlay + break-even line + current-dial marker), value-flow split
+  bar (where each yield dollar goes). dao_fixed_cost dial added.
   Model: daily-timestep port of ~/clawd/base-launch-loop/base_loop_sim.py
   Identities baked in: float neutrality, T-bill parity peg, ~9x yield/equity conversion.
 -->
@@ -55,7 +62,7 @@
   .tgl { display:flex; justify-content:space-between; align-items:center; padding:7px 0; font-size:12.5px; border-top:1px dashed var(--border); margin-top:7px;}
   .tgl input { accent-color:var(--accent); transform:scale(1.2); }
 
-  .cards { display:grid; grid-template-columns:repeat(6,1fr); gap:10px; margin-bottom:14px; }
+  .cards { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin-bottom:14px; }
   .card { background:var(--card); border:1px solid var(--border); border-radius:9px; padding:10px 12px; }
   .card .k { font-size:10.5px; color:var(--dim); text-transform:uppercase; letter-spacing:.6px; margin-bottom:4px;}
   .card .v { font-size:19px; font-weight:650; }
@@ -66,6 +73,8 @@
   .chart-card h3 { font-size:12.5px; color:var(--dim); font-weight:600; margin-bottom:6px; letter-spacing:.4px;}
   .chart-box { position:relative; height:340px; }
   .chart-box.tall { height:400px; }
+  .chart-box.split { height:200px; }
+  .chart-box.laffer { height:380px; }
   .note { font-size:11.5px; color:var(--dim); padding:8px 2px; }
   #inv-flag { display:none; margin:0 0 14px; padding:9px 13px; border:1px solid var(--red); border-radius:8px; color:var(--red); font-size:12.5px; background:#1a0e0d; }
   #attr-line { font-size:11.5px; color:var(--dim); padding:2px 2px 8px; }
@@ -75,8 +84,8 @@
 <body>
 <header>
   <h1>alUSDb Base — Loop Mechanics Lab</h1>
-  <span class="chip">rev v1.1</span>
-  <span class="rev">daily-timestep port of base_loop_sim.py · debtor-side 0.1% fee · no borrower interest · 28d linear vest</span>
+  <span class="chip">rev v2.0</span>
+  <span class="rev">daily-timestep port of base_loop_sim.py · debtor-side redemption fee · no borrower interest · 28d linear vest · DAO fee-economics layer</span>
 </header>
 <div class="wrap">
 <aside>
@@ -92,7 +101,7 @@
   </div>
   <button id="runBtn">⟳ RE-RUN SIMULATION</button>
   <div id="controls"></div>
-  <div class="note">Model simplifications: daily steps, LP inventory loss as depth drift only, blended fee tier, one defender pool (sticky + arb), deterministic seeded noise. Identities: float neutrality (0.99r re-mint / r redeemed), peg bid = 1−(r_f+premium)×28/365, ~9x yield/equity conversion.</div>
+  <div class="note">Model simplifications: daily steps, LP inventory loss as depth drift only, blended fee tier, one defender pool (sticky + arb), deterministic seeded noise. Identities: float neutrality (0.99r re-mint / r redeemed), peg bid = 1−(r_f+premium)×28/365, ~9x yield/equity conversion. Laffer charts re-run the full engine per fee point with noise OFF (comparable curves); the marker ⧫ is your current dial position.</div>
 </aside>
 <main>
   <div id="inv-flag"></div>
@@ -103,12 +112,19 @@
     <div class="card"><div class="k">supply D (2yr)</div><div class="v mono" id="s-supply">–</div><div class="s">float <span id="s-float" class="mono">–</span></div></div>
     <div class="card"><div class="k">collateral C</div><div class="v mono" id="s-c">–</div><div class="s">from <span id="s-c0" class="mono">–</span> start</div></div>
     <div class="card"><div class="k">defender capital</div><div class="v mono" id="s-arb">–</div><div class="s">arb profit <span id="s-arbp" class="mono">–</span></div></div>
+    <div class="card"><div class="k">DAO perf-fee rev (yr 2)</div><div class="v mono" id="s-daoperf">–</div><div class="s">MYT yield cut · <span id="s-daoperfx" class="mono">–</span> avg</div></div>
+    <div class="card"><div class="k">DAO redemption rev (yr 2)</div><div class="v mono" id="s-daoprot">–</div><div class="s">protocolFee on debtor collateral · <span id="s-daoprotx" class="mono">–</span> avg</div></div>
+    <div class="card"><div class="k">DAO net (yr 2)</div><div class="v mono" id="s-daonet">–</div><div class="s">rev − emis <span id="s-daonetx" class="mono">–</span> − fixed <span id="s-daofix" class="mono">–</span></div></div>
   </div>
   <div class="chart-card"><h3>PEG — alUSDb / USDC (bid = T-bill indifference, amber dashed)</h3><div class="chart-box tall"><canvas id="c-peg"></canvas></div></div>
   <div class="chart-card"><h3>SYSTEM SIZE — collateral / debt / float ($M)</h3><div class="chart-box"><canvas id="c-size"></canvas></div></div>
   <div class="chart-card"><h3>LIQUIDITY — LP depth & defender capital ($M)</h3><div class="chart-box"><canvas id="c-liq"></canvas></div></div>
   <div class="chart-card"><h3>RATES — LP / arb / looper APR (%)</h3><div class="chart-box"><canvas id="c-apr"></canvas></div></div>
   <div class="chart-card"><h3>CHURN — cumulative minted vs redeemed ($M)</h3><div class="chart-box"><canvas id="c-churn"></canvas></div><div id="attr-line"></div></div>
+  <div class="chart-card"><h3>DAO REVENUE — trailing 365d ($k/yr), stacked: MYT perf fee vs protocolFee on redemptions</h3><div class="chart-box"><canvas id="c-daorev"></canvas></div></div>
+  <div class="chart-card"><h3>PERF-FEE LAFFER — full engine re-run per point (noiseless): DAO revenue split + terminal supply</h3><div class="chart-box laffer"><canvas id="c-laffer-perf"></canvas></div></div>
+  <div class="chart-card"><h3>PROTOCOL-FEE LAFFER — full engine re-run per point (noiseless): DAO revenue split + terminal supply</h3><div class="chart-box laffer"><canvas id="c-laffer-prot"></canvas></div></div>
+  <div class="chart-card"><h3>VALUE FLOW — avg $k/yr by recipient over the run (where each yield dollar goes)</h3><div class="chart-box split"><canvas id="c-split"></canvas></div></div>
 </main>
 </div>
 
@@ -118,7 +134,7 @@
 const DEFAULTS = {
   days:730, seed:7,
   ltv:0.90, redemption_days:28, protocol_fee:0.001, perf_fee:0.15, myt_yield:0.05,
-  dealloc_cap_daily:0.10,
+  dealloc_cap_daily:0.10, dao_fixed_cost:3e5,
   initial_equity:2e6, initial_depth:1e6, initial_arb:1.5e6, initial_peg:0.999,
   seed_liquidity_team:5e5,
   impact_k:0.035, sticky_frac:0.10, peg_max:1.005, peg_floor_hard:0.90,
@@ -166,7 +182,8 @@ function runSimRaw(cfg){
   let backlog=0, pendR=0, pendY=0;
   let ema=0, avgDsum=0;
   let equity=0, arbProfit=0, lpFees=0, lpEmis=0, protFee=0, perfFee=0, debtorFees=0;
-  let mintVol=0, redeemVol=0;
+  let mintVol=0, redeemVol=0, grossYield=0;
+  const revPerfD=[], revProtD=[];                    // daily DAO revenue streams ($)
   const attr={replacement:0, yield:0, equity:0};
   const vest=[];
   let myt=c.myt_yield;
@@ -189,7 +206,8 @@ function runSimRaw(cfg){
     // 1) YIELD: collateral compounds net of perf fee; debt has NO interest.
     //    Yield creates mint capacity via the LTV ceiling, loop leverages it.
     const y=C*myt/365, yNet=y*(1-c.perf_fee);
-    C+=yNet; perfFee+=y*c.perf_fee;
+    C+=yNet; perfFee+=y*c.perf_fee; grossYield+=y;
+    revPerfD.push(y*c.perf_fee); revProtD.push(0);
     pendY += yNet*0.9/(1-c.ltv*c.initial_peg);
 
     // 2) NEW EXTERNAL EQUITY: loopers chase levered carry
@@ -269,6 +287,7 @@ function runSimRaw(cfg){
       C-=pay*(1+c.protocol_fee);                    // fee extracted from DEBTORS
       D-=pay;
       protFee+=pay*c.protocol_fee; debtorFees+=pay*c.protocol_fee;
+      revProtD[day]+=pay*c.protocol_fee;
       redeemVol+=pay; cr+=pay; pendR+=pay; arb+=pay;
       for(let i=vest.length-1;i>=0;i--){
         vest[i][1]*=(1-1/c.redemption_days);
@@ -317,10 +336,16 @@ function runSimRaw(cfg){
   const years=c.days/365;
   const avgD=avgDsum/Math.max(c.days,1);
   const mature=pegs.slice(366), launch=pegs.slice(0,57), postLaunch=pegs.slice(57);
+  // trailing-365d DAO revenue (python trail(): expanding window in year 1)
+  const trail=(arr,d,n=365)=>{let s=0;for(let i=Math.max(0,d-n+1);i<=d;i++)s+=arr[i];return s;};
+  const daoPerfPath=[], daoProtPath=[], daoDays=[];
+  for(let d=0;d<c.days;d+=7){daoDays.push(d);daoPerfPath.push(trail(revPerfD,d));daoProtPath.push(trail(revProtD,d));}
+  const daoPerfYr=trail(revPerfD,c.days-1), daoProtYr=trail(revProtD,c.days-1);
   return {
     finalC:C, finalD:D, finalF:F, finalArb:arb, finalDepth:depth,
-    ledgers:{equity, arbProfit, lpFees, lpEmis, protFee, perfFee, debtorFees, redeemVol, mintVol},
+    ledgers:{equity, arbProfit, lpFees, lpEmis, protFee, perfFee, debtorFees, redeemVol, mintVol, grossYield},
     attr, avgD, years, bid:1-(c.arb_hurdle+c.risk_premium)*c.redemption_days/365,
+    daoPerfYr, daoProtYr,
     maturePeg: mature.length? mature.reduce((a,b)=>a+b,0)/mature.length : NaN,
     launchLow: launch.length? Math.min(...launch) : NaN,
     postLaunchMin: postLaunch.length? Math.min(...postLaunch) : NaN,
@@ -328,7 +353,8 @@ function runSimRaw(cfg){
     churn: redeemVol/Math.max(avgD*years,1),
     churnRatio: redeemVol/Math.max(mintVol,1),
     invariants:inv,
-    series:{pegs,Cs,Ds,Fs,depths,arbs,lpAprs,arbAprs,looperAprs,cumMint,cumRedeem}
+    series:{pegs,Cs,Ds,Fs,depths,arbs,lpAprs,arbAprs,looperAprs,cumMint,cumRedeem,
+            daoDays,daoPerfPath,daoProtPath,revPerfD,revProtD}
   };
 }
 
@@ -360,8 +386,9 @@ const CONTROL_GROUPS=[
    ["ltv","LTV",0.5,0.95,0.001,"lin",v=>(v*100).toFixed(1)+"%"],
    ["redemption_days","redemption vest (d)",7,90,1,"lin",v=>v.toFixed(0)],
    ["protocol_fee","redemption fee (debtor)",0,0.01,0.0001,"lin",v=>(v*100).toFixed(2)+"%"],
-   ["perf_fee","MYT perf fee",0,0.3,0.005,"lin",v=>(v*100).toFixed(1)+"%"],
+   ["perf_fee","MYT perf fee",0,0.5,0.005,"lin",v=>(v*100).toFixed(1)+"%"],
    ["dealloc_cap_daily","dealloc cap/day",0.01,0.5,0.005,"lin",v=>(v*100).toFixed(1)+"%"],
+   ["dao_fixed_cost","DAO fixed cost $/yr",0,2e6,"log",null,v=>"$"+fmtMoney(v)],
  ]},
  {name:"Yield & Start State", open:true, keys:[
    ["myt_yield","MYT yield",0,0.12,0.001,"lin",v=>(v*100).toFixed(2)+"%"],
@@ -560,7 +587,90 @@ function buildCharts(R){
   }
 }
 
-/* ============================= render ============================= */
+/* ============================= fee economics (v2.0) ============================= */
+const PERF_SWEEP=[0,0.025,0.05,0.075,0.10,0.125,0.15,0.175,0.20,0.225,0.25,0.275,0.30,0.325,0.35,0.375,0.40];
+const PROT_SWEEP=[0,0.001,0.002,0.003,0.004,0.005,0.006,0.0075,0.009,0.010,0.0125,0.015,0.0175,0.020];
+
+// Full-engine Laffer sweep: re-run per point, noiseless (comparable curves).
+// Python: sweep() in base_loop_sim.py — JS must match these numbers exactly.
+function sweepFee(key,values){
+  const out=[];
+  for(const v of values){
+    const r=runSimRaw(Object.assign({},P,{[key]:v,flow_noise:0}));
+    out.push({fee:v,perf_k:r.daoPerfYr/1e3,prot_k:r.daoProtYr/1e3,
+              total_k:(r.daoPerfYr+r.daoProtYr)/1e3,
+              DM:r.finalD/1e6,CM:r.finalC/1e6});
+  }
+  return out;
+}
+
+function buildFeeCharts(R){
+  // ---- DAO revenue path: stacked areas, trailing-365d ----
+  const daoPts=a=>a.map((v,i)=>({x:R.series.daoDays[i],y:v/1e3}));
+  mkChart("c-daorev",{type:"line",data:{datasets:[
+    ds("MYT perf fee","#f0b72f",daoPts(R.series.daoPerfPath),{fill:true,backgroundColor:"rgba(240,183,47,.22)"}),
+    ds("protocolFee on redemptions","#ffa657",daoPts(R.series.daoProtPath),{fill:true,backgroundColor:"rgba(255,166,87,.22)"})
+  ]},options:baseOpts("$k/yr",{scales:{
+    x:{type:"linear",grid:GRID,ticks:Object.assign({maxTicksLimit:9,callback:v=>"d"+v},TICK)},
+    y:Object.assign({},baseOpts().scales.y,{stacked:true,ticks:Object.assign({callback:v=>"$"+v+"k"},TICK)})
+  }})});
+
+  // ---- Laffer pair ----
+  const sp=sweepFee("perf_fee",PERF_SWEEP), st=sweepFee("protocol_fee",PROT_SWEEP);
+  const breakeven=(P.emissions_per_day*365+P.dao_fixed_cost)/1e3;   // $k/yr
+  function laffer(id,rows,fmtX,curFee){
+    const labels=rows.map(r=>fmtX(r.fee));
+    const nearest=rows.reduce((b,r)=>Math.abs(r.fee-curFee)<Math.abs(b.fee-curFee)?r:b,rows[0]);
+    const ni=rows.indexOf(nearest);
+    return mkChart(id,{type:"bar",data:{labels,datasets:[
+      {label:"perf-fee revenue",data:rows.map(r=>r.perf_k),backgroundColor:"rgba(240,183,47,.75)",stack:"dao",yAxisID:"y"},
+      {label:"redemption-fee revenue",data:rows.map(r=>r.prot_k),backgroundColor:"rgba(255,166,87,.75)",stack:"dao",yAxisID:"y"},
+      {type:"line",label:"terminal supply D ($M)",data:rows.map(r=>r.DM),borderColor:"#58a6ff",borderWidth:1.6,pointRadius:0,yAxisID:"y1",tension:.2},
+      {type:"line",label:"DAO break-even (emissions+fixed)",data:rows.map(()=>breakeven),borderColor:"#ff7b72",borderDash:[6,4],borderWidth:1.2,pointRadius:0,yAxisID:"y"},
+      {type:"scatter",label:"current dial",data:rows.map((r,i)=>i===ni?{x:ni,y:r.total_k}:null).filter(Boolean),
+       pointStyle:"rectRot",pointRadius:7,pointBorderWidth:2,borderColor:"#39d353",backgroundColor:"rgba(57,211,83,.25)",showLine:false,yAxisID:"y"}
+    ]},options:{responsive:true,maintainAspectRatio:false,animation:false,
+      interaction:{mode:"index",intersect:false},
+      plugins:{legend:{labels:{color:"#7d938a",boxWidth:12,font:{size:10}}},
+               tooltip:{callbacks:{label:c=>c.dataset.label+": "+(typeof c.parsed.y==="number"?c.parsed.y.toFixed(1):"")}}},
+      scales:{
+        x:{grid:GRID,ticks:Object.assign({},TICK)},
+        y:{stacked:true,grid:GRID,title:{display:true,text:"$k/yr",color:"#7d938a",font:{size:10}},ticks:Object.assign({callback:v=>"$"+v+"k"},TICK)},
+        y1:{position:"right",grid:{drawOnChartArea:false},title:{display:true,text:"D $M",color:"#58a6ff",font:{size:10}},ticks:Object.assign({callback:v=>v+"M"},TICK)}
+      }}});
+  }
+  laffer("c-laffer-perf",sp,v=>(v*100).toFixed(1)+"%",P.perf_fee);
+  laffer("c-laffer-prot",st,v=>(v*1e4).toFixed(v*1e4%5?1:0)+"bp",P.protocol_fee);
+  return {sp,st,breakeven};
+}
+
+function mkChart(id,config){
+  if(charts[id]) charts[id].destroy();
+  charts[id]=new Chart(document.getElementById(id),config);
+  return charts[id];
+}
+
+// ---- value-flow split: avg $k/yr by recipient ----
+function buildSplit(R){
+  const yr=Math.max(R.years,1e-9), L=R.ledgers;
+  const rows=[
+    ["depositors (net yield)",(L.grossYield-L.perfFee)/yr/1e3,"#39d353"],
+    ["DAO · MYT perf fee",L.perfFee/yr/1e3,"#f0b72f"],
+    ["DAO · protocolFee (redemptions)",L.protFee/yr/1e3,"#ffa657"],
+    ["defenders (discount capture)",L.arbProfit/yr/1e3,"#ff7b72"],
+    ["LPs (fees + emissions)",(L.lpFees+L.lpEmis)/yr/1e3,"#bc8cff"]
+  ];
+  mkChart("c-split",{type:"bar",data:{labels:["avg $k/yr"],datasets:rows.map(([l,v,c])=>({
+    label:l,data:[v],backgroundColor:c+"cc",stack:"v"}))},
+    options:{indexAxis:"y",responsive:true,maintainAspectRatio:false,animation:false,
+      plugins:{legend:{labels:{color:"#7d938a",boxWidth:12,font:{size:10}}},
+               tooltip:{callbacks:{label:c=>c.dataset.label+": $"+c.parsed.x.toFixed(1)+"k/yr"}}},
+      scales:{x:{stacked:true,grid:GRID,ticks:Object.assign({callback:v=>"$"+v+"k"},TICK)},
+              y:{stacked:true,grid:{drawOnChartArea:false},ticks:TICK}}}});
+  return rows;
+}
+
+
 let LAST=null;
 function render(){
   const R=runSimRaw(P);
@@ -585,15 +695,32 @@ function render(){
   document.getElementById("s-c0").textContent="$"+fmtMoney(P.initial_equity+P.seed_liquidity_team);
   document.getElementById("s-arb").textContent="$"+fmtMoney(R.finalArb);
   document.getElementById("s-arbp").textContent="$"+fmtMoney(R.ledgers.arbProfit);
+
+  // DAO revenue cards (yr-2 trailing-365 reads; avg over full run as sub-line)
+  const emisYr=P.emissions_per_day*365;
+  const daoNetYr=R.daoPerfYr+R.daoProtYr-emisYr-P.dao_fixed_cost;
+  document.getElementById("s-daoperf").textContent="$"+fmtMoney(R.daoPerfYr);
+  document.getElementById("s-daoperfx").textContent="$"+fmtMoney(R.ledgers.perfFee/R.years);
+  document.getElementById("s-daoprot").textContent="$"+fmtMoney(R.daoProtYr);
+  document.getElementById("s-daoprotx").textContent="$"+fmtMoney(R.ledgers.protFee/R.years);
+  const netEl=document.getElementById("s-daonet");
+  netEl.textContent=(daoNetYr>=0?"$":"−$")+fmtMoney(Math.abs(daoNetYr));
+  netEl.className="v mono "+(daoNetYr>=0?"good":"bad");
+  document.getElementById("s-daonetx").textContent="$"+fmtMoney(emisYr);
+  document.getElementById("s-daofix").textContent="$"+fmtMoney(P.dao_fixed_cost);
   document.getElementById("attr-line").textContent=
     `mints $${fmtMoney(R.ledgers.mintVol)} = replacement $${fmtMoney(R.attr.replacement)} + yield-conv $${fmtMoney(R.attr.yield)} + equity-conv $${fmtMoney(R.attr.equity)} · churn ratio (redeem/mint) ${R.churnRatio.toFixed(2)}`;
 
   buildCharts(R);
+  const FE=buildFeeCharts(R);
+  const SPLIT=buildSplit(R);
   syncControls();
 
   // debug/verification handle
   window.__lab={P, DEFAULTS, run:runSimRaw, result:R, bid:R.bid, series:R.series,
-                invariants:R.invariants, presets:PRESETS, charts};
+                invariants:R.invariants, presets:PRESETS, charts,
+                dao:{perfYr:R.daoPerfYr,protYr:R.daoProtYr,netYr:daoNetYr},
+                sweeps:FE, split:SPLIT};
 }
 
 /* ============================= wiring ============================= */
