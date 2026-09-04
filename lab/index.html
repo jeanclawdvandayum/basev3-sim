@@ -37,6 +37,14 @@
   NOT a DAO cash cost (~$2M veAERO votes two pools: basic stable +
   concentrated, 80/20 weight to stable) — DAO net + Laffer break-even now
   respect the emissions_cost_dao flag.
+  Rev v2.3 (2026-09-03) — hover tooltips on all parameter dials (PARAM_HELP
+  dictionary) + cold-start toggle (no defenders at t=0).
+  Rev v2.4 (2026-09-03, scoopy) — peg-yield elasticity fix: discount-scaled
+  absorption (the VISIBLE discount sizes the defender book), APR-spread
+  quadratic arb migration (2x APR = 4x inflow), carry-aware looper gate
+  (~2wk levered-carry tolerance); slope at starved defenders halves.
+  Rev v2.5 (2026-09-04, scoopy) — redemption vest dial widened 7-90d -> 7-365d
+  (one year) so long-vest regimes are selectable in params.
   Model: daily-timestep port of ~/clawd/base-launch-loop/base_loop_sim.py
   Identities baked in: float neutrality, T-bill parity peg, ~9x yield/equity conversion.
 -->
@@ -110,7 +118,7 @@
 <body>
 <header>
   <h1>alUSDb Base — Loop Mechanics Lab</h1>
-  <span class="chip">rev v2.3</span>
+  <span class="chip">rev v2.5</span>
   <span class="rev">daily-timestep port of base_loop_sim.py · debtor-side redemption fee · no borrower interest · 28d linear vest · DAO fee-economics layer</span>
 </header>
 <div class="wrap">
@@ -537,7 +545,7 @@ const CONTROL_GROUPS=[
  ]},
  {name:"Protocol (spec-verified)", open:true, keys:[
    ["ltv","LTV",0.5,0.95,0.001,"lin",v=>(v*100).toFixed(1)+"%"],
-   ["redemption_days","redemption vest (d)",7,90,1,"lin",v=>v.toFixed(0)],
+   ["redemption_days","redemption vest (d)",7,365,1,"lin",v=>v.toFixed(0)],
    ["protocol_fee","redemption fee (debtor)",0,0.01,0.0001,"lin",v=>(v*100).toFixed(2)+"%"],
    ["perf_fee","MYT perf fee",0,0.5,0.005,"lin",v=>(v*100).toFixed(1)+"%"],
    ["dealloc_cap_daily","dealloc cap/day",0.01,0.5,0.005,"lin",v=>(v*100).toFixed(1)+"%"],
